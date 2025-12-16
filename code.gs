@@ -116,6 +116,16 @@ function formatValue(key, value) {
  * @param {Object} searchParams - 搜尋過濾條件 (Key-Value 對應)
  * @return {Object} 包含資料列表、總筆數、頁次資訊的物件
  */
+/**
+ * 讀取資料 (Read) - 支援分頁與搜尋
+ * [Modified] 若為 CMF 表，額外計算 PRXMF 的筆數 (Server-side Count Aggregation)
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} sheetName - 工作表名稱
+ * @param {number} page - 目前頁碼 (從 1 開始)
+ * @param {number} pageSize - 每頁筆數 (0 代表不分頁，回傳全部)
+ * @param {Object} searchParams - 搜尋過濾條件 (Key-Value 對應)
+ * @return {Object} 包含資料列表、總筆數、頁次資訊的物件
+ */
 function readSheet(ss, sheetName, page, pageSize, searchParams) {
   const sheet = getOrCreateSheet(ss, sheetName);
   const dataRange = sheet.getDataRange();
@@ -178,13 +188,49 @@ function readSheet(ss, sheetName, page, pageSize, searchParams) {
   let totalPages = 1;
 
   if (pageSize > 0) {
-    // 依據 createAt 或 INDATE 排序? 
-    // 目前維持原始順序 (通常是寫入順序)，若需排序可在此加入 .sort()
-    
     const startIndex = (page - 1) * pageSize;
     // 使用 slice 截取當頁資料
     pagedData = allRows.slice(startIndex, startIndex + pageSize);
     totalPages = Math.ceil(totalCount / pageSize);
+  }
+
+  // --- [NEW] 優化：若讀取的是 CMF，順便計算 PRXMF 筆數 (prxCount) ---
+  if (sheetName === 'CMF' && pagedData.length > 0) {
+    try {
+      const prxSheet = ss.getSheetByName('PRXMF');
+      if (prxSheet && prxSheet.getLastRow() > 1) {
+        // 優化技巧：只讀取 CID1 欄位來計算，避免載入整個 PRXMF 表
+        const prxHeaders = prxSheet.getRange(1, 1, 1, prxSheet.getLastColumn()).getValues()[0];
+        const cidIndex = prxHeaders.indexOf('CID1');
+        
+        if (cidIndex !== -1) {
+          // 讀取 CID1 直欄的所有數據 (從第 2 列開始)
+          // 這裡假設 PRXMF 不會超過 GAS 的記憶體上限 (通常 5-10萬筆內可接受)
+          const cidValues = prxSheet.getRange(2, cidIndex + 1, prxSheet.getLastRow() - 1, 1).getValues();
+          
+          // 建立當前頁面 CID 的 Set 以加速比對
+          const targetCids = new Set(pagedData.map(c => String(c.CID1 || '').trim()));
+          const countMap = {};
+
+          // 遍歷所有驗光資料的 CID1，若是目標客戶則計數
+          for (let k = 0; k < cidValues.length; k++) {
+            const prxCid = String(cidValues[k][0]).trim();
+            if (targetCids.has(prxCid)) {
+              countMap[prxCid] = (countMap[prxCid] || 0) + 1;
+            }
+          }
+
+          // 將計算結果寫回 pagedData
+          pagedData.forEach(c => {
+            const id = String(c.CID1 || '').trim();
+            c.prxCount = countMap[id] || 0;
+          });
+        }
+      }
+    } catch(e) {
+      // 若計算失敗 (例如 PRXMF 不存在)，不影響主流程，僅 console.error (GAS看得到)
+      Logger.log("Count aggregation failed: " + e);
+    }
   }
 
   // 回傳完整結構
