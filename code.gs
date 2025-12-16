@@ -1,0 +1,407 @@
+/**
+ * ==========================================================================
+ * Google Apps Script 後端 API 腳本
+ * 用途：作為網頁前端與 Google Sheets 資料庫之間的中介層 (CRUD 操作)
+ * 功能：
+ * 1. 讀取 (Read): 支援分頁 (Pagination) 與 多欄位搜尋 (Search)
+ * 2. 新增 (Create): 單筆或批次新增，自動產生 UUID 與 createdAt
+ * 3. 更新 (Update): 依據 id 更新資料，自動補齊舊資料缺少的系統欄位
+ * 4. 刪除 (Delete): 依據 id 刪除資料
+ * ==========================================================================
+ */
+
+// 定義 Google 試算表的 ID (請確認此 ID 對應到正確的試算表檔案)
+const SPREADSHEET_ID = '1Ev9CL1iuSblh27YaazjoKe2B_O50193Z4-jf25-8a2U';
+
+/**
+ * 處理 HTTP GET 請求的進入點
+ * GET 請求通常用於讀取資料 (Read)
+ * @param {Object} e - 事件參數，包含查詢參數 (e.parameter)
+ * @return {GoogleAppsScript.Content.TextOutput} JSON 格式的回傳結果
+ */
+function doGet(e) { return handleRequest(e); }
+
+/**
+ * 處理 HTTP POST 請求的進入點
+ * POST 請求通常用於寫入或修改資料 (Create, Update, Delete)
+ * @param {Object} e - 事件參數，包含 POST Body (e.postData)
+ * @return {GoogleAppsScript.Content.TextOutput} JSON 格式的回傳結果
+ */
+function doPost(e) { return handleRequest(e); }
+
+/**
+ * 核心請求處理函式
+ * 負責解析參數、分派動作、並處理併發鎖定 (LockService) 以確保資料一致性
+ * @param {Object} e - 事件參數
+ */
+function handleRequest(e) {
+  // 取得腳本鎖定，防止多位使用者同時寫入導致資料錯亂 (Race Condition)
+  // 嘗試鎖定 30 秒 (30000 ms)，若逾時則會拋出錯誤
+  const lock = LockService.getScriptLock();
+  lock.tryLock(30000);
+
+  try {
+    // 開啟試算表
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const params = e.parameter || {};
+    
+    // 解析 POST Body (如果是 POST 請求，資料通常在 body 中)
+    let postData = null;
+    if (e.postData && e.postData.contents) {
+      try { postData = JSON.parse(e.postData.contents); } catch (err) {
+        // 若解析 JSON 失敗，postData 維持 null，後續邏輯會 fallback 使用 e.parameter
+      }
+    }
+    
+    // 決定操作參數 (優先使用 POST Body 中的參數，若無則使用 URL Query String 參數)
+    const reqAction = postData ? postData.action : params.action; // 動作: read, create, update, delete
+    const reqSheet = postData ? postData.sheet : params.sheet;   // 表格名稱: CMF (客戶), PRXMF (驗光)
+    const reqData = postData ? postData.data : null;             // 資料內容 (物件或陣列)
+    const reqId = postData ? postData.id : params.id;            // 目標資料 ID (用於 update/delete)
+
+    // 分頁與搜尋參數 (通常用於 read 動作)
+    const page = parseInt(postData ? postData.page : params.page) || 1;           // 頁碼，預設第 1 頁
+    const pageSize = parseInt(postData ? postData.pageSize : params.pageSize) || 0; // 每頁筆數，0 代表全部
+    const searchParams = postData ? postData.search : (params.search ? JSON.parse(params.search) : {}); // 搜尋條件物件
+
+    let result = {};
+
+    // 根據動作分派給對應函式
+    if (reqAction === 'read') result = readSheet(ss, reqSheet, page, pageSize, searchParams);
+    else if (reqAction === 'create') result = createRow(ss, reqSheet, reqData);
+    else if (reqAction === 'createBatch') result = createBatch(ss, reqSheet, reqData);
+    else if (reqAction === 'update') result = updateRow(ss, reqSheet, reqId, reqData);
+    else if (reqAction === 'delete') result = deleteRow(ss, reqSheet, reqId);
+    else result = { status: 'error', message: 'Unknown action: ' + reqAction };
+
+    // 設定回傳格式為 JSON
+    return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
+    
+  } catch (err) {
+    // 全域錯誤處理：回傳錯誤訊息
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: 'error', 
+      message: err.toString(), 
+      stack: err.stack 
+    })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    // 無論成功與否，最後必須釋放鎖定
+    lock.releaseLock();
+  }
+}
+
+/**
+ * 格式化寫入的值 (解決 Google Sheets 掉零問題與格式轉換)
+ * 針對 CID1 (客戶編號) 與 TEL (電話)，強制加上單引號，讓 Sheet 視為純文字，避免開頭的 0 被去除。
+ * @param {string} key - 欄位名稱
+ * @param {any} value - 欄位值
+ * @return {string} 格式化後的值
+ */
+function formatValue(key, value) {
+  if (value === undefined || value === null) return '';
+  const strVal = String(value);
+  if (key === 'CID1' || key === 'TEL') {
+    // 如果已經有單引號則不加，否則加上單引號
+    return strVal.startsWith("'") ? strVal : "'" + strVal;
+  }
+  return strVal;
+}
+
+/**
+ * 讀取資料 (Read) - 支援分頁與搜尋
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} sheetName - 工作表名稱
+ * @param {number} page - 目前頁碼 (從 1 開始)
+ * @param {number} pageSize - 每頁筆數 (0 代表不分頁，回傳全部)
+ * @param {Object} searchParams - 搜尋過濾條件 (Key-Value 對應)
+ * @return {Object} 包含資料列表、總筆數、頁次資訊的物件
+ */
+function readSheet(ss, sheetName, page, pageSize, searchParams) {
+  const sheet = getOrCreateSheet(ss, sheetName);
+  const dataRange = sheet.getDataRange();
+  
+  // 若試算表完全空白，回傳空結果
+  if (dataRange.getLastRow() === 0) return { status: 'success', data: [], total: 0, page: 1, totalPages: 0 };
+  
+  const rawData = dataRange.getValues();
+  // 第一列為標題 (Header)
+  const headers = rawData[0];
+  
+  // 將其餘列轉換為物件陣列 JSON 格式
+  // 從第 2 列開始 (Index 1) 為數據
+  let allRows = [];
+  for (let i = 1; i < rawData.length; i++) {
+    const rowObj = {};
+    let hasData = false; // 標記該列是否有有效數據
+    
+    for (let j = 0; j < headers.length; j++) {
+      const header = headers[j];
+      const val = rawData[i][j];
+      
+      // 轉換日期物件為 ISO 字串，方便前端處理
+      if (val instanceof Date) {
+        rowObj[header] = val.toISOString();
+      } else {
+        rowObj[header] = String(val);
+      }
+
+      if (val !== "") hasData = true;
+    }
+    
+    // 只有當該列有資料時才加入結果 (略過空行)
+    if (hasData) {
+      allRows.push(rowObj);
+    }
+  }
+
+  // --- 搜尋過濾邏輯 ---
+  if (searchParams && Object.keys(searchParams).length > 0) {
+    allRows = allRows.filter(item => {
+      // 檢查每一個搜尋條件
+      return Object.keys(searchParams).every(key => {
+        const queryVal = String(searchParams[key] || '').toLowerCase().trim();
+        // 若搜尋條件為空，則忽略該條件
+        if (!queryVal) return true;
+        
+        // 取得資料中的值
+        const itemVal = String(item[key] || '').toLowerCase();
+        
+        // 使用模糊搜尋 (Includes)
+        return itemVal.includes(queryVal);
+      });
+    });
+  }
+
+  // --- 分頁邏輯 ---
+  const totalCount = allRows.length;
+  let pagedData = allRows;
+  let totalPages = 1;
+
+  if (pageSize > 0) {
+    // 依據 createAt 或 INDATE 排序? 
+    // 目前維持原始順序 (通常是寫入順序)，若需排序可在此加入 .sort()
+    
+    const startIndex = (page - 1) * pageSize;
+    // 使用 slice 截取當頁資料
+    pagedData = allRows.slice(startIndex, startIndex + pageSize);
+    totalPages = Math.ceil(totalCount / pageSize);
+  }
+
+  // 回傳完整結構
+  return { 
+    status: 'success', 
+    data: pagedData, 
+    total: totalCount, 
+    page: page, 
+    totalPages: totalPages,
+    pageSize: pageSize 
+  };
+}
+
+/**
+ * 新增單筆資料 (Create)
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} sheetName - 工作表名稱
+ * @param {Object} data - 要新增的資料物件
+ * @return {Object} 執行結果與寫入的資料
+ */
+function createRow(ss, sheetName, data) {
+  const sheet = getOrCreateSheet(ss, sheetName);
+  const headers = getHeaders(sheet);
+  
+  // 自動生成 ID (UUID) - 用於系統內部唯一識別
+  if (!data.id) data.id = Utilities.getUuid();
+  // 自動生成 createdAt (ISO String) - 用於記錄建立時間
+  if (!data.createdAt) data.createdAt = new Date().toISOString();
+  
+  // 若傳入的資料包含新欄位，自動更新 Sheet 的標頭
+  const newHeaders = updateHeaders(sheet, headers, data);
+  const row = [];
+  
+  // 依據最新標頭的順序填入資料，並套用格式化 (防掉零)
+  for (const header of newHeaders) {
+    row.push(formatValue(header, data[header]));
+  }
+  
+  sheet.appendRow(row);
+  return { status: 'success', data: data };
+}
+
+/**
+ * 批次新增資料 (Batch Create) - 用於 CSV 匯入效能優化
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} sheetName - 工作表名稱
+ * @param {Array<Object>} dataArray - 資料物件陣列
+ * @return {Object} 成功筆數
+ */
+function createBatch(ss, sheetName, dataArray) {
+  if (!Array.isArray(dataArray) || dataArray.length === 0) return { status: 'success', count: 0 };
+  const sheet = getOrCreateSheet(ss, sheetName);
+  let headers = getHeaders(sheet);
+  
+  // 收集所有資料的所有欄位名稱 (聯集)
+  const allKeys = new Set(headers);
+  dataArray.forEach(d => Object.keys(d).forEach(k => allKeys.add(k)));
+  const newHeaderList = Array.from(allKeys);
+  
+  // 如果有新欄位，更新 Sheet 標頭
+  if (newHeaderList.length > headers.length) {
+    sheet.getRange(1, 1, 1, newHeaderList.length).setValues([newHeaderList]);
+    headers = newHeaderList;
+  }
+
+  // 準備二維陣列進行一次性寫入，大幅提升效能
+  const rows = dataArray.map(data => {
+    if (!data.id) data.id = Utilities.getUuid();
+    if (!data.createdAt) data.createdAt = new Date().toISOString();
+    return headers.map(header => formatValue(header, data[header]));
+  });
+
+  if (rows.length > 0) {
+    // 取得最後一列的位置，接續寫入
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+  }
+  return { status: 'success', count: rows.length };
+}
+
+/**
+ * 更新資料 (Update)
+ * 優先使用 ID 搜尋，若無 ID 則嘗試使用 CID1 搜尋 (相容舊資料)
+ * 特點：若找到舊資料且該列沒有 id 或 createdAt，會在此時自動補上
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} sheetName - 工作表名稱
+ * @param {string} id - 目標資料 ID
+ * @param {Object} data - 更新內容
+ * @return {Object} 更新後的資料或錯誤訊息
+ */
+function updateRow(ss, sheetName, id, data) {
+  const sheet = getOrCreateSheet(ss, sheetName);
+  const allData = sheet.getDataRange().getValues();
+  const headers = allData[0];
+  
+  let rowIndex = -1;
+  const idIndex = headers.indexOf('id');
+  const createdAtIndex = headers.indexOf('createdAt');
+  
+  // 1. 優先嘗試用 ID 找
+  if (id && idIndex !== -1) {
+    for (let i = 1; i < allData.length; i++) {
+      if (String(allData[i][idIndex]) === String(id)) { rowIndex = i + 1; break; }
+    }
+  }
+  // 2. 如果沒 ID，嘗試用 CID1 找 (處理舊資料遷移)
+  if (rowIndex === -1 && data.CID1) {
+     const cidIndex = headers.indexOf('CID1');
+     if (cidIndex !== -1) {
+       for (let i = 1; i < allData.length; i++) {
+         if (String(allData[i][cidIndex]) === String(data.CID1)) { rowIndex = i + 1; break; }
+       }
+     }
+  }
+
+  if (rowIndex === -1) return { status: 'error', message: 'Row not found' };
+
+  // 若有新欄位，更新標頭
+  const newHeaders = updateHeaders(sheet, headers, data);
+  
+  // 【自動補齊機制】
+  // 檢查該列 id 欄位是否為空 (舊資料)
+  if (idIndex !== -1) {
+    const currentId = sheet.getRange(rowIndex, idIndex + 1).getValue();
+    if (!currentId) {
+      // 補上新的 ID
+      const newId = data.id || Utilities.getUuid();
+      sheet.getRange(rowIndex, idIndex + 1).setValue(newId);
+      data.id = newId; // 更新 data 物件以便回傳給前端
+    }
+  }
+
+  // 檢查 createdAt 欄位是否為空
+  if (createdAtIndex !== -1) {
+     const currentCreated = sheet.getRange(rowIndex, createdAtIndex + 1).getValue();
+     if (!currentCreated) {
+        sheet.getRange(rowIndex, createdAtIndex + 1).setValue(new Date().toISOString());
+     }
+  }
+
+  // 逐一更新資料欄位
+  for (const key in data) {
+    const colIndex = newHeaders.indexOf(key);
+    // 更新資料，套用格式化，且不隨意覆寫 id (除非上方補齊邏輯)
+    if (colIndex !== -1 && key !== 'id') {
+      sheet.getRange(rowIndex, colIndex + 1).setValue(formatValue(key, data[key]));
+    }
+  }
+  
+  return { status: 'success', message: 'Updated', data: data };
+}
+
+/**
+ * 刪除資料 (Delete)
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} sheetName - 工作表名稱
+ * @param {string} id - 要刪除的資料 ID
+ * @return {Object} 執行結果
+ */
+function deleteRow(ss, sheetName, id) {
+  const sheet = getOrCreateSheet(ss, sheetName);
+  const allData = sheet.getDataRange().getValues();
+  const headers = allData[0];
+  const idIndex = headers.indexOf('id');
+  
+  if (idIndex === -1) return { status: 'error', message: 'ID column not found' };
+  
+  for (let i = 1; i < allData.length; i++) {
+    if (String(allData[i][idIndex]) === String(id)) {
+      sheet.deleteRow(i + 1); // 刪除整列
+      return { status: 'success', message: 'Deleted' };
+    }
+  }
+  return { status: 'error', message: 'ID not found' };
+}
+
+// --- 輔助函式 (Helper Functions) ---
+
+/**
+ * 取得或建立工作表
+ * 若工作表不存在則建立，並預設加入 id 與 createdAt 欄位
+ */
+function getOrCreateSheet(ss, name) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) { 
+    sheet = ss.insertSheet(name); 
+    sheet.appendRow(['id', 'createdAt']); // 初始化標題列
+  }
+  return sheet;
+}
+
+/**
+ * 取得工作表目前的標題列
+ */
+function getHeaders(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) return [];
+  return sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+}
+
+/**
+ * 檢查並更新工作表標題列
+ * 若 data 中有新欄位，則將其附加到標題列後方
+ */
+function updateHeaders(sheet, currentHeaders, newData) {
+  const newKeys = Object.keys(newData);
+  let updatedHeaders = [...currentHeaders];
+  let isUpdated = false;
+  
+  for (const key of newKeys) {
+    if (!updatedHeaders.includes(key)) { 
+      updatedHeaders.push(key); 
+      isUpdated = true; 
+    }
+  }
+  
+  if (isUpdated) {
+    sheet.getRange(1, 1, 1, updatedHeaders.length).setValues([updatedHeaders]);
+  }
+  return updatedHeaders;
+}
