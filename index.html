@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>鐘錶眼鏡客戶管理系統</title>
+
+    <!-- Tailwind CSS (UI 樣式庫) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React & ReactDOM (前端核心框架) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+    <!-- Babel (JSX 編譯器) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- PapaParse (CSV 處理工具) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import {
+            getAuth,
+            signInWithPopup,
+            GoogleAuthProvider,
+            signOut,
+            onAuthStateChanged
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import {
+            getFirestore,
+            collection,
+            doc,
+            setDoc,
+            addDoc,
+            deleteDoc,
+            updateDoc,
+            getDocs,
+            query,
+            where,
+            onSnapshot
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.firebaseModules = {
+            initializeApp, getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged,
+            getFirestore, collection, doc, setDoc, addDoc, deleteDoc, updateDoc, getDocs, query, where, onSnapshot
+        };
+    </script>
+</head>
+
+<body class="bg-gray-50 text-gray-800 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, Component } = React;
+
+        /* ==========================================================================
+           MODULE: Config.js (系統設定模組)
+           用途：存放 API URL、Firebase 設定、地理資料、欄位定義
+           ========================================================================== */
+
+        const GAS_API_URL = "https://script.google.com/macros/s/AKfycbzcbRhUDh4UsPA0Mn7QnKsD0hkLeo-xrTXb2LHwKLUZHuYOBfGh-xVYeNyIoJXHxQT9/exec";
+
+        /**
+         * 系統預設分頁設定
+         */
+        const DEFAULT_PAGE_SIZE = 20; // 每頁顯示 20 筆 
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDxtxWF-jQMMxvAeMjP5-HJ6y6_QBxLdsY",
+            authDomain: "test1-1246d.firebaseapp.com",
+            projectId: "test1-1246d",
+            storageBucket: "test1-1246d.firebasestorage.app",
+            messagingSenderId: "1046567528056",
+            appId: "1:1046567528056:web:4e34594985c21d8892af8d",
+            measurementId: "G-8JNGR22WDW"
+        };
+
+        // 台灣縣市資料
+        const TAIWAN_CITIES = {
+            "臺北市": ["中正區", "大同區", "中山區", "松山區", "大安區", "萬華區", "信義區", "士林區", "北投區", "內湖區", "南港區", "文山區"],
+            "臺南市": ["中西區", "東區", "南區", "北區", "安平區", "安南區", "永康區", "歸仁區", "新化區", "左鎮區", "玉井區", "楠西區", "南化區", "仁德區", "關廟區", "龍崎區", "官田區", "麻豆區", "佳里區", "西港區", "七股區", "將軍區", "學甲區", "北門區", "新營區", "後壁區", "白河區", "東山區", "六甲區", "下營區", "柳營區", "鹽水區", "善化區", "大內區", "山上區", "新市區", "安定區"],
+            "高雄市": ["楠梓區", "左營區", "鼓山區", "三民區", "鹽埕區", "前金區", "新興區", "苓雅區", "前鎮區", "旗津區", "小港區", "鳳山區", "林園區", "大寮區", "大樹區", "大社區", "仁武區", "鳥松區", "岡山區", "橋頭區", "燕巢區", "田寮區", "阿蓮區", "路竹區", "湖內區", "茄萣區", "永安區", "彌陀區", "梓官區", "旗山區", "美濃區", "六龜區", "甲仙區", "杉林區", "內門區", "茂林區", "桃源區", "那瑪夏區"],
+            // ...其他縣市資料
+        };
+
+        const COMMON_ROADS = ["中正路", "中山路", "中華路", "民族路", "民權路", "民生路", "成功路", "西門路", "北門路", "東門路", "南門路", "大同路", "開元路", "長榮路", "林森路", "東寧路", "裕農路", "小東路", "海安路", "金華路", "安平路", "安和路", "安中路", "北安路", "大灣路", "永大路", "中興路", "復興路"];
+        const TAINAN_ROADS = {
+            "永康區": ["中正北路", "中正南路", "中華路", "大灣路", "永大路", "復興路", "龍埔街", "中山北路", "中山南路", "文化路", "永華路", "自強路"],
+            "東區": ["中華東路", "林森路", "東寧路", "裕農路", "崇德路", "崇明路", "小東路", "長榮路", "東門路", "前鋒路", "大學路"],
+            "中西區": ["中正路", "中山路", "民族路", "民權路", "民生路", "西門路", "府前路", "金華路", "海安路", "忠義路", "南門路", "五妃街"],
+            "北區": ["西門路", "北門路", "開元路", "長榮路", "公園路", "和緯路", "文賢路", "成功路", "小北路"],
+            "安南區": ["安中路", "安和路", "北安路", "海佃路", "長和路", "安吉路", "本原街", "安明路", "台江大道"],
+            "南區": ["金華路", "中華南路", "國民路", "大成路", "夏林路", "健康路", "西門路", "濱南路"],
+            "安平區": ["安平路", "華平路", "育平路", "國平路", "郡平路", "永華路", "慶平路", "安億路"]
+        };
+
+        // 客戶資料欄位定義
+        const CMF_FIELDS = [
+            { key: 'CID1', label: '客戶編號', type: 'text', required: true },
+            { key: 'NAME', label: '客戶姓名', type: 'text', required: true },
+            { key: 'SEX', label: '性別', type: 'select', options: [{ val: 1, label: '男' }, { val: 0, label: '女' }, { val: 2, label: '其他' }] },
+            { key: 'TEL', label: '電話', type: 'tel' },
+            { key: 'BIRDATE', label: '生日', type: 'text', isDateAppendable: true },
+            { key: 'ADDRESS', label: '地址', type: 'address', className: 'col-span-2' },
+            { key: 'INDATE', label: '初訪日期', type: 'text', isDateAppendable: true },
+            { key: 'LASTD', label: '最後日期', type: 'text', isDateAppendable: true },
+            { key: 'CLASS', label: '備考', type: 'text' },
+            { key: 'CLASS1', label: '備考1', type: 'text' },
+            { key: 'SUM', label: '總計', type: 'number' },
+        ];
+
+        // 驗光資料欄位鍵值 (用於 CSV)
+        const PRXMF_FIELDS_KEYS = ['DATE', 'RSPH', 'RCYL', 'RAXIS', 'RADD', 'RBCV', 'RBCH', 'LSPH', 'LCYL', 'LAXIS', 'LADD', 'LBCV', 'LBCH', 'PD', 'ITEM', 'RITEM', 'LITEM', 'RBRVISE1', 'LBRVISE1', 'RBRVISE2', 'LBRVISE2', 'REMARK', 'REMARK2', 'REMARK3', 'AGE', 'NUM'];
+
+        /* ==========================================================================
+           MODULE: Services.js (服務層)
+           用途：封裝 GAS API 呼叫與錯誤處理
+           ========================================================================== */
+        const apiService = {
+            /**
+             * 讀取資料 (Read)
+             * @param {string} sheet - 表格名稱 (CMF: 客戶, PRXMF: 驗光)
+             * @param {number} page - 頁碼
+             * @param {number} pageSize - 每頁筆數
+             * @param {Object} search - 搜尋條件物件
+             */
+            read: async (sheet, page = 1, pageSize = 0, search = {}) => {
+                try {
+                    // 建構查詢參數字串
+                    const searchStr = encodeURIComponent(JSON.stringify(search));
+                    const url = `${GAS_API_URL}?action=read&sheet=${sheet}&page=${page}&pageSize=${pageSize}&search=${searchStr}`;
+
+                    const res = await fetch(url);
+                    const json = await res.json();
+
+                    if (json.status === 'success') {
+                        // 清理每一個物件中的資料，將 null/undefined 轉為空字串，處理日期格式
+                        const cleanData = (Array.isArray(json.data) ? json.data : []).map(item => {
+                            const cleanItem = {};
+                            for (const key in item) {
+                                let val = item[key];
+                                // 若為日期字串且包含 'T' (ISO format)，嘗試只取前段日期
+                                // 注意：後端回傳的是 ISO String，這邊簡單處理
+                                if (typeof val === 'string' && val.includes('T') && val.length > 20) {
+                                    // 簡單判斷是否類似 ISO Date String
+                                    // 實際上某些欄位可能是純文字但剛好有 T，這裡假設系統欄位或日期欄位
+                                    // 為了安全起見，這邊可以不做過度轉換，維持原樣或由顯示層處理
+                                    // 但原程式碼邏輯有處理，保留相容性：
+                                    // if (val instanceof Date) ... 但 json 傳回來已經是字串
+                                    // 這裡僅針對特定欄位或維持字串即可，前端顯示時再 substring
+                                }
+                                cleanItem[key] = (val === null || val === undefined) ? '' : String(val);
+                            }
+                            return cleanItem;
+                        });
+
+                        // 回傳包含分頁資訊的完整結構
+                        return {
+                            data: cleanData,
+                            total: json.total || 0,
+                            page: json.page || 1,
+                            totalPages: json.totalPages || 0
+                        };
+                    }
+                    return { data: [], total: 0, page: 1, totalPages: 0 };
+                } catch (e) {
+                    console.error(`API Read Error (${sheet}):`, e);
+                    return { data: [], total: 0, page: 1, totalPages: 0 };
+                }
+            },
+            create: async (sheet, data) => {
+                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'create', sheet, data }) });
+                return await res.json();
+            },
+            update: async (sheet, id, data) => {
+                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'update', sheet, id, data }) });
+                return await res.json();
+            },
+            delete: async (sheet, id) => {
+                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'delete', sheet, id }) });
+                return await res.json();
+            }
+        };
+
+        /* ==========================================================================
+           MODULE: Components.js (UI 元件)
+           ========================================================================== */
+        const LoadingSpinner = () => <div className="flex justify-center items-center p-8"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;
+
+        const Modal = ({ title, onClose, children, size = 'default' }) => (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                <div className={`bg-white rounded-lg shadow-xl w-full ${size === 'large' ? 'max-w-6xl' : 'max-w-4xl'} max-h-[90vh] overflow-y-auto`}>
+                    <div className="flex justify-between items-center p-4 border-b sticky top-0 bg-white z-10">
+                        <h3 className="text-xl font-bold text-gray-800">{title}</h3>
+                        <button onClick={onClose} className="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                    </div>
+                    <div className="p-6">{children}</div>
+                </div>
+            </div>
+        );
+
+        // SVG Icons
+        const Icon = ({ children, className, ...props }) => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>{children}</svg>;
+        const Search = (props) => <Icon {...props}><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></Icon>;
+        const Plus = (props) => <Icon {...props}><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></Icon>;
+        const Trash2 = (props) => <Icon {...props}><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></Icon>;
+        const Edit = (props) => <Icon {...props}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></Icon>;
+        const User = (props) => <Icon {...props}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></Icon>;
+        const LogOut = (props) => <Icon {...props}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></Icon>;
+        const FileSpreadsheet = (props) => <Icon {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M8 13h2"></path><path d="M8 17h2"></path><path d="M14 13h2"></path><path d="M14 17h2"></path></Icon>;
+        const Database = (props) => <Icon {...props}><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></Icon>;
+        const Eye = (props) => <Icon {...props}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></Icon>;
+        const Lock = (props) => <Icon {...props}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></Icon>;
+        const FileText = (props) => <Icon {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></Icon>;
+        const Calendar = (props) => <Icon {...props}><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></Icon>;
+
+        // Error Boundary
+        class ErrorBoundary extends Component {
+            constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+            static getDerivedStateFromError(error) { return { hasError: true, error }; }
+            componentDidCatch(error, errorInfo) { console.error("Error:", error, errorInfo); }
+            render() {
+                if (this.state.hasError) return <div className="p-8 text-red-600 font-bold">系統錯誤: {this.state.error?.toString()} <button className="ml-4 underline" onClick={() => window.location.reload()}>重整</button></div>;
+                return this.props.children;
+            }
+        }
+
+        /* ==========================================================================
+           MODULE: View Components (視圖元件 - 拆分以避免語法錯誤)
+           ========================================================================== */
+
+        /**
+         * 搜尋與列表視圖元件
+         * 包含搜尋條件輸入框、搜尋按鈕、以及資料列表呈現
+         * [NEW] 新增分頁控制面板
+         */
+        const SearchView = ({
+            searchCriteria,      // 搜尋條件狀態
+            setSearchCriteria,   // 設定搜尋條件
+            handleSearch,        // 執行搜尋函式
+            hasSearched,         // 是否已經執行過搜尋
+            customers,           // 客戶資料列表 (當前頁面)
+            isAdmin,             // 是否為管理員
+            openCustomerModal,   // 開啟客戶編輯視窗
+            setSelectedCustomer, // 設定選取客戶 (進入詳細頁)
+            deleteCustomer,      // 刪除客戶函式
+            prxCounts,           // 驗光紀錄統計
+            currentPage,         // [NEW] 目前頁碼
+            totalPages,          // [NEW] 總頁數
+            totalCount,          // [NEW] 總筆數
+            setPage              // [NEW] 設定頁碼函式
+        }) => {
+            return (
+                <div className="space-y-6">
+                    {/* 搜尋條件區塊 */}
+                    <div className="bg-white p-4 rounded shadow">
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-lg font-semibold flex items-center"><Search className="w-5 h-5 mr-2" /> 搜尋條件</h2>
+                            {isAdmin && (
+                                <button onClick={() => openCustomerModal()} className="bg-blue-600 text-white px-4 py-2 rounded flex items-center shadow hover:bg-blue-700 font-bold">
+                                    <Plus className="w-4 h-4 mr-1" /> 新增客戶
+                                </button>
+                            )}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
+                            <input placeholder="客戶編號" className="border p-2 rounded" value={searchCriteria.CID1} onChange={e => setSearchCriteria({ ...searchCriteria, CID1: e.target.value })} />
+                            <input placeholder="姓名" className="border p-2 rounded" value={searchCriteria.NAME} onChange={e => setSearchCriteria({ ...searchCriteria, NAME: e.target.value })} />
+                            <input placeholder="電話" className="border p-2 rounded" value={searchCriteria.TEL} onChange={e => setSearchCriteria({ ...searchCriteria, TEL: e.target.value })} />
+                            <input placeholder="地址" className="border p-2 rounded" value={searchCriteria.ADDRESS} onChange={e => setSearchCriteria({ ...searchCriteria, ADDRESS: e.target.value })} />
+                            <input type="text" placeholder="生日 (YYYY-MM-DD)" className="border p-2 rounded" value={searchCriteria.BIRDATE} onChange={e => setSearchCriteria({ ...searchCriteria, BIRDATE: e.target.value })} />
+                            <button onClick={handleSearch} className="bg-blue-600 text-white p-2 rounded flex justify-center items-center"><Search className="mr-1" /> 搜尋</button>
+                        </div>
+                    </div>
+
+                    {/* 搜尋結果列表區塊 */}
+                    <div className="bg-white p-4 rounded shadow fade-in">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="font-bold">搜尋結果 (共 {totalCount} 筆)</h2>
+                            {/* 分頁控制 */}
+                            {totalPages > 0 && (
+                                <div className="flex items-center space-x-2">
+                                    <button
+                                        disabled={currentPage === 1}
+                                        onClick={() => setPage(currentPage - 1)}
+                                        className={`px-3 py-1 rounded border ${currentPage === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white hover:bg-gray-50 text-blue-600'}`}
+                                    >
+                                        上一頁
+                                    </button>
+                                    <span className="text-sm text-gray-600">第 {currentPage} / {totalPages} 頁</span>
+                                    <button
+                                        disabled={currentPage === totalPages}
+                                        onClick={() => setPage(currentPage + 1)}
+                                        className={`px-3 py-1 rounded border ${currentPage === totalPages ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white hover:bg-gray-50 text-blue-600'}`}
+                                    >
+                                        下一頁
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full">
+                                <thead className="bg-gray-50"><tr><th className="p-2 text-left">編號</th><th className="p-2 text-left">姓名</th><th className="p-2">性別</th><th className="p-2">電話</th><th className="p-2">生日</th><th className="p-2">驗光數</th><th className="p-2">操作</th></tr></thead>
+                                <tbody>
+                                    {customers.map((c, idx) => (
+                                        <tr key={c.id || idx} className="border-t hover:bg-gray-50">
+                                            <td className="p-2">{String(c.CID1 || '')}</td>
+                                            <td className="p-2 text-blue-600 cursor-pointer hover:underline" onClick={() => setSelectedCustomer(c)}>{String(c.NAME || '')}</td>
+                                            <td className="p-2 text-center">{c.SEX == 0 ? '女' : c.SEX == 2 ? '其他' : '男'}</td>
+                                            <td className="p-2">{String(c.TEL || '')}</td>
+                                            <td className="p-2">{String(c.BIRDATE || '')}</td>
+                                            <td className="p-2 text-center font-bold">{prxCounts[String(c.CID1 || '').trim()] || 0}</td>
+                                            <td className="p-2 flex gap-2 justify-center">
+                                                <button onClick={() => { setSelectedCustomer(c) }} className="text-blue-600 hover:text-blue-800" title="詳細資料"><FileText /></button>
+                                                {isAdmin && <><button onClick={() => openCustomerModal(c)} className="text-green-600 hover:text-green-800"><Edit /></button><button onClick={() => deleteCustomer(c.id, c.CID1)} className="text-red-600 hover:text-red-800"><Trash2 /></button></>}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    {customers.length === 0 && <tr><td colSpan="7" className="text-center py-8 text-gray-400">尚無資料，請嘗試調整搜尋條件</td></tr>}
+                                </tbody>
+                            </table>
+                        </div>
+                        {/* 底部簡易分頁導航 */}
+                        {customers.length > 0 && (
+                            <div className="mt-4 flex justify-end text-xs text-gray-500">
+                                顯示 {customers.length} 筆資料 (本頁)
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const CustomerDetailView = ({ selectedCustomer, isAdmin, openCustomerModal, openPrxModal, deletePrx, customerPrescriptions }) => {
+            return (
+                <div className="space-y-6 fade-in">
+                    <div className="bg-white p-6 rounded shadow-lg border-l-4 border-blue-600 relative">
+                        <div className="flex justify-between items-start mb-4">
+                            <h2 className="text-2xl font-bold text-gray-800">{String(selectedCustomer.NAME)} <span className="text-lg text-gray-500 font-normal">({String(selectedCustomer.CID1)})</span></h2>
+                            {isAdmin && <button onClick={() => openCustomerModal(selectedCustomer)} className="text-blue-600 hover:bg-blue-50 p-2 rounded"><Edit className="w-5 h-5" /></button>}
+                        </div>
+                        <div className="grid md:grid-cols-3 gap-4 text-sm">
+                            <div>電話: {String(selectedCustomer.TEL)}</div><div>生日: {String(selectedCustomer.BIRDATE)}</div><div>性別: {selectedCustomer.SEX == 0 ? '女' : selectedCustomer.SEX == 2 ? '其他' : '男'}</div>
+                            <div className="col-span-3">地址: {String(selectedCustomer.ADDRESS)}</div>
+                            <div>初訪: {String(selectedCustomer.INDATE)}</div><div>最後: {String(selectedCustomer.LASTD)}</div><div>總計: {String(selectedCustomer.SUM)}</div>
+                            <div className="col-span-3 bg-gray-50 p-2">備考: {String(selectedCustomer.CLASS)} {String(selectedCustomer.CLASS1)}</div>
+                        </div>
+                    </div>
+                    <div className="bg-white p-4 rounded shadow">
+                        <div className="flex justify-between mb-4 border-b pb-2"><h3 className="font-bold flex items-center"><Database className="mr-2" /> 驗光紀錄</h3>{isAdmin && <button onClick={() => openPrxModal()} className="bg-green-600 text-white px-3 py-1 rounded flex items-center"><Plus className="w-4 mr-1" /> 新增驗光</button>}</div>
+                        <div className="space-y-4">
+                            {customerPrescriptions.map(p => (
+                                <div key={p.id} className="border rounded-lg p-4 hover:shadow-md bg-white">
+                                    <div className="flex justify-between font-bold mb-3 border-b pb-1">
+                                        <span className="text-blue-800 text-lg">{String(p.DATE || '')}</span>
+                                        <div className="flex gap-2">
+                                            <button onClick={() => openPrxModal(p)} className="text-blue-600 text-sm flex items-center hover:bg-gray-100 p-1 rounded"><Eye className="w-4 h-4 mr-1" /> {isAdmin ? '編輯' : '詳細'}</button>
+                                            {isAdmin && <button onClick={() => deletePrx(p.id)} className="text-red-600 text-sm flex items-center hover:bg-gray-100 p-1 rounded"><Trash2 className="w-4 h-4 mr-1" /> 刪除</button>}
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                        <div className="bg-red-50 p-3 rounded border border-red-100">
+                                            <div className="font-bold text-red-800 mb-2 border-b border-red-200">右眼 (R)</div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {['RSPH', 'RCYL', 'RAXIS', 'RADD', 'RBCH', 'RBCV', 'RBRVISE1', 'RBRVISE2'].map(k => <div key={k}><span className="text-gray-500 text-xs block">{k.replace('R', '')}</span>{String(p[k] || '')}</div>)}
+                                                <div className="col-span-3"><span className="text-gray-500 text-xs block">隱形眼鏡</span>{String(p.RITEM || '')}</div>
+                                            </div>
+                                        </div>
+                                        <div className="bg-blue-50 p-3 rounded border border-blue-100">
+                                            <div className="font-bold text-blue-800 mb-2 border-b border-blue-200">左眼 (L)</div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {['LSPH', 'LCYL', 'LAXIS', 'LADD', 'LBCH', 'LBCV', 'LBRVISE1', 'LBRVISE2'].map(k => <div key={k}><span className="text-gray-500 text-xs block">{k.replace('L', '')}</span>{String(p[k] || '')}</div>)}
+                                                <div className="col-span-3"><span className="text-gray-500 text-xs block">隱形眼鏡</span>{String(p.LITEM || '')}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="mt-4 pt-3 border-t-2 border-gray-100 bg-gray-50 p-3 rounded">
+                                        <div className="text-xs text-gray-600 grid grid-cols-2 gap-y-2">
+                                            <div className="col-span-2 md:col-span-1"><span className="font-bold text-gray-500">瞳距 (PD):</span> {String(p.PD || '')}</div>
+                                            <div className="col-span-2 md:col-span-1"><span className="font-bold text-gray-500">年齡 (AGE):</span> {String(p.AGE || '')}</div>
+                                            <div className="col-span-2"><span className="font-bold text-gray-500">鏡框/鏡片 (ITEM):</span> {String(p.ITEM || '')}</div>
+                                            <div className="col-span-2"><span className="font-bold text-gray-500">備註 1:</span> {String(p.REMARK || '')}</div>
+                                            <div className="col-span-2"><span className="font-bold text-gray-500">備註 2:</span> {String(p.REMARK2 || '')}</div>
+                                            <div className="col-span-2"><span className="font-bold text-gray-500">備註 3:</span> {String(p.REMARK3 || '')}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                            {customerPrescriptions.length === 0 && <div className="text-center text-gray-400 py-4">尚無驗光紀錄</div>}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const AdminPanelView = ({ exportCSV, systemUsers, addUser, updateUserRole, removeUser }) => {
+            return (
+                <div className="space-y-6">
+                    <div className="bg-white p-6 rounded shadow grid md:grid-cols-2 gap-6">
+                        <div className="border p-4">
+                            <h3 className="font-bold mb-2 text-blue-600">客戶資料 (CMF)</h3>
+                            <button onClick={() => exportCSV('CMF')} className="w-full bg-gray-100 py-2 mb-2 rounded">匯出 CSV</button>
+                        </div>
+                        <div className="border p-4">
+                            <h3 className="font-bold mb-2 text-green-600">驗光資料 (PRXMF)</h3>
+                            <button onClick={() => exportCSV('PRXMF')} className="w-full bg-gray-100 py-2 mb-2 rounded">匯出 CSV</button>
+                        </div>
+                    </div>
+                    <div className="bg-white p-6 rounded shadow">
+                        <h2 className="font-bold mb-4">使用者權限管理</h2>
+                        <div className="flex gap-2 mb-4"><input id="u_email" placeholder="Email" className="border p-2 flex-1 rounded" /><button onClick={() => { addUser(document.getElementById('u_email').value) }} className="bg-blue-600 text-white px-4 rounded">新增</button></div>
+                        <ul className="divide-y">{systemUsers.map(u => (<li key={u.id} className="py-2 flex justify-between items-center"><span>{u.email} ({u.role})</span><div className="flex gap-2"><select value={u.role} onChange={e => updateUserRole(u.id, e.target.value)} className="border"><option value="pending">未授權</option><option value="user">使用者</option><option value="admin">管理員</option></select><button onClick={() => removeUser(u.id)} className="text-red-600">刪除</button></div></li>))}</ul>
+                    </div>
+                </div>
+            );
+        };
+
+        /* ==========================================================================
+           MODULE: Main.js (主程式邏輯)
+           ========================================================================== */
+        const App = () => {
+            // State Definitions
+            const [user, setUser] = useState(null);
+            const [isAdmin, setIsAdmin] = useState(false);
+            const [userRole, setUserRole] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [activeTab, setActiveTab] = useState('search');
+            const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+
+            const [appAuth, setAppAuth] = useState(null);
+            const [appDb, setAppDb] = useState(null);
+            const [appIdVal, setAppIdVal] = useState('default-app-id');
+
+            const [customers, setCustomers] = useState([]);
+            const [allPrescriptions, setAllPrescriptions] = useState([]);
+            const [filteredCustomers, setFilteredCustomers] = useState([]);
+            const [selectedCustomer, setSelectedCustomer] = useState(null);
+            const [customerPrescriptions, setCustomerPrescriptions] = useState([]);
+
+            // [NEW] Pagination States
+            const [currentPage, setCurrentPage] = useState(1);
+            const [totalCount, setTotalCount] = useState(0);
+            const [totalPages, setTotalPages] = useState(0);
+
+            const [searchCriteria, setSearchCriteria] = useState({ CID1: '', NAME: '', TEL: '', ADDRESS: '', BIRDATE: '' });
+            const [hasSearched, setHasSearched] = useState(false);
+
+            const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
+            const [isPrxModalOpen, setIsPrxModalOpen] = useState(false);
+            const [editingData, setEditingData] = useState({});
+            const [mode, setMode] = useState('add');
+            const [isViewOnly, setIsViewOnly] = useState(false);
+
+            const [addrCity, setAddrCity] = useState('臺南市');
+            const [addrDist, setAddrDist] = useState('');
+            const [addrRoad, setAddrRoad] = useState('');
+            const [addrDetail, setAddrDetail] = useState('');
+
+            const [systemUsers, setSystemUsers] = useState([]);
+            const [msg, setMsg] = useState({ text: '', type: '' });
+            const [authError, setAuthError] = useState(null);
+
+            // Init
+            useEffect(() => {
+                const check = setInterval(() => {
+                    if (window.firebaseModules) {
+                        clearInterval(check);
+                        try {
+                            const fb = window.firebaseModules;
+                            let app;
+                            try { app = fb.initializeApp(firebaseConfig); } catch (e) { }
+                            setAppAuth(fb.getAuth());
+                            setAppDb(fb.getFirestore());
+                            setIsFirebaseReady(true);
+                        } catch (e) { console.error("Init Error", e); }
+                    }
+                }, 100);
+                return () => clearInterval(check);
+            }, []);
+
+            const prxCounts = useMemo(() => {
+                const counts = {};
+                if (Array.isArray(allPrescriptions)) {
+                    allPrescriptions.forEach(p => {
+                        if (p && p.CID1) {
+                            const id = String(p.CID1).trim();
+                            if (id) counts[id] = (counts[id] || 0) + 1;
+                        }
+                    });
+                }
+                return counts;
+            }, [allPrescriptions]);
+
+            // Auth
+            useEffect(() => {
+                if (!isFirebaseReady || !appAuth) return;
+                const { onAuthStateChanged, getDocs, addDoc, updateDoc, collection, doc } = window.firebaseModules;
+                onAuthStateChanged(appAuth, async (currentUser) => {
+                    setUser(currentUser);
+                    if (currentUser) {
+                        const adminRef = collection(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users');
+                        const PREDEFINED = ['alenchen@stust.edu.tw', 'v1277.chen@gmail.com.tw'];
+                        try {
+                            const snap = await getDocs(adminRef);
+                            const allUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                            const myUser = allUsers.find(u => u.email === currentUser.email);
+                            let role = 'pending';
+                            if (PREDEFINED.includes(currentUser.email)) role = 'admin';
+                            else if (myUser) role = myUser.role || 'pending';
+
+                            if (!myUser) await addDoc(adminRef, { email: currentUser.email, role, addedAt: new Date().toISOString() });
+                            else if (PREDEFINED.includes(currentUser.email) && myUser.role !== 'admin') await updateDoc(doc(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users', myUser.id), { role: 'admin' });
+                            setUserRole(role);
+                            setIsAdmin(role === 'admin');
+                        } catch (err) { if (PREDEFINED.includes(currentUser.email)) { setUserRole('admin'); setIsAdmin(true); } }
+                    } else {
+                        setIsAdmin(false); setUserRole(null); setCustomers([]); setAllPrescriptions([]); setSelectedCustomer(null);
+                        setFilteredCustomers([]); setHasSearched(false); setSearchCriteria({ CID1: '', NAME: '', TEL: '', ADDRESS: '', BIRDATE: '' });
+                    }
+                });
+            }, [isFirebaseReady, appAuth, appDb]);
+
+            // Data Fetch (Updated for Pagination)
+            // Data Fetch (Updated for Pagination)
+            const fetchData = async (pageOverride) => {
+                if (!GAS_API_URL || !user) return;
+                setLoading(true);
+                const targetPage = pageOverride || currentPage;
+                try {
+                    const [cRes, pRes] = await Promise.all([
+                        apiService.read('CMF', targetPage, DEFAULT_PAGE_SIZE, searchCriteria),
+                        apiService.read('PRXMF')
+                    ]);
+                    setCustomers(Array.isArray(cRes.data) ? cRes.data : []);
+                    setTotalCount(cRes.total || 0);
+                    setTotalPages(cRes.totalPages || 1);
+                    setAllPrescriptions(Array.isArray(pRes) ? pRes : (pRes.data || []));
+                } catch (e) { showMsg("資料讀取失敗", "error"); } finally { setLoading(false); }
+            };
+
+            // 當頁碼改變時，自動重新讀取
+            // [MODIFIED] 增加 hasSearched 檢查，避免登入後自動讀取全量資料
+            useEffect(() => {
+                if (user && userRole !== 'pending' && hasSearched) {
+                    fetchData();
+                }
+            }, [user, userRole, currentPage]);
+
+            // Sync Prx
+            useEffect(() => {
+                if (selectedCustomer && allPrescriptions.length > 0) {
+                    const matches = allPrescriptions.filter(p => String(p.CID1).trim() === String(selectedCustomer.CID1).trim());
+                    matches.sort((a, b) => new Date(b.DATE) - new Date(a.DATE));
+                    setCustomerPrescriptions(matches);
+                } else setCustomerPrescriptions([]);
+            }, [selectedCustomer, allPrescriptions]);
+
+            // Handlers
+            const handleGoogleLogin = async () => {
+                setAuthError(null);
+                const { signInWithPopup, GoogleAuthProvider } = window.firebaseModules;
+                try { await signInWithPopup(appAuth, new GoogleAuthProvider()); }
+                catch (e) { setAuthError({ type: e.code === 'auth/unauthorized-domain' ? 'domain' : 'other', message: e.message, domain: window.location.hostname }); }
+            };
+            const handleLogout = () => {
+                const { signOut } = window.firebaseModules;
+                signOut(appAuth);
+                // Reset State
+                setCustomers([]); setAllPrescriptions([]); setSelectedCustomer(null); setFilteredCustomers([]); setHasSearched(false);
+            };
+
+            const handleSearch = () => {
+                setCurrentPage(1);
+                fetchData(1);
+                setHasSearched(true);
+            };
+
+            // CRUD & Modals
+            const openCustomerModal = (c) => {
+                setMode(c ? 'edit' : 'add');
+                const initialSex = c ? (c.SEX !== undefined ? parseInt(c.SEX) : 1) : 1;
+                setEditingData(c ? { ...c, SEX: initialSex } : { CID1: '', NAME: '', SEX: 1, INDATE: new Date().toISOString().split('T')[0], ADDRESS: '' });
+                setAddrCity('臺南市'); setAddrDist(''); setAddrRoad(''); setAddrDetail(c ? (c.ADDRESS || '') : '');
+                setIsCustomerModalOpen(true);
+            };
+
+            const handleRoadChange = (val) => {
+                setAddrRoad(val);
+                if (val) {
+                    const fullPart = `${addrCity}${addrDist}${val}`;
+                    setEditingData(prev => ({ ...prev, ADDRESS: (prev.ADDRESS || '') + fullPart }));
+                    setAddrRoad('');
+                }
+            };
+
+            const handleDateAppend = (key, dateVal) => {
+                if (!dateVal) return;
+                setEditingData(prev => ({ ...prev, [key]: (prev[key] ? prev[key] + ' ' : '') + dateVal }));
+            };
+
+            const saveCustomer = async () => {
+                if (!isAdmin) return;
+                setLoading(true);
+                const dataToSave = { ...editingData };
+                const sexVal = parseInt(editingData.SEX);
+                dataToSave.SEX = isNaN(sexVal) ? 1 : sexVal;
+                dataToSave.CID1 = String(dataToSave.CID1);
+
+                try {
+                    let newCustomer = null;
+                    if (mode === 'add') {
+                        if (customers.some(c => String(c.CID1) === String(dataToSave.CID1))) { alert('編號重複'); setLoading(false); return; }
+                        // Optimistic
+                        const tempId = 'temp_' + Date.now();
+                        const optData = { ...dataToSave, id: tempId };
+                        const newCustList = [...customers, optData];
+                        setCustomers(newCustList);
+                        if (hasSearched) setFilteredCustomers(prev => [...prev, optData]);
+
+                        const res = await apiService.create('CMF', dataToSave);
+                        if (res.status === 'success') {
+                            newCustomer = res.data;
+                            // Replace Temp ID
+                            const realList = newCustList.map(c => c.id === tempId ? res.data : c);
+                            setCustomers(realList);
+                            if (hasSearched) setFilteredCustomers(prev => prev.map(c => c.id === tempId ? res.data : c));
+                        }
+                    } else {
+                        // Edit Optimistic Logic
+                        // 1. Update Main List
+                        const updatedList = customers.map(c => {
+                            // Match by ID if present, else by CID1
+                            const isMatch = (c.id && c.id === dataToSave.id) || (!c.id && String(c.CID1) === String(dataToSave.CID1));
+                            return isMatch ? dataToSave : c;
+                        });
+                        setCustomers(updatedList);
+
+                        // 2. Update Filtered List
+                        if (hasSearched) {
+                            setFilteredCustomers(prev => prev.map(c => {
+                                const isMatch = (c.id && c.id === dataToSave.id) || (!c.id && String(c.CID1) === String(dataToSave.CID1));
+                                return isMatch ? dataToSave : c;
+                            }));
+                        }
+                        // If we are viewing the edited customer, update view
+                        if (selectedCustomer && (selectedCustomer.id === dataToSave.id || selectedCustomer.CID1 === dataToSave.CID1)) {
+                            setSelectedCustomer(dataToSave);
+                        }
+
+                        await apiService.update('CMF', dataToSave.id, dataToSave);
+                    }
+
+                    setIsCustomerModalOpen(false);
+                    showMsg('儲存成功', 'success');
+
+                    if (mode === 'add' && newCustomer) {
+                        setSelectedCustomer(newCustomer);
+                        setTimeout(() => openPrxModal(null, newCustomer), 500);
+                    }
+                } catch (e) { showMsg('失敗: ' + e.message, 'error'); } finally { setLoading(false); }
+            };
+
+            const deleteCustomer = async (id) => {
+                if (!isAdmin || !confirm('確定刪除?')) return;
+                setLoading(true);
+                try {
+                    setCustomers(prev => prev.filter(c => c.id !== id));
+                    setFilteredCustomers(prev => prev.filter(c => c.id !== id));
+                    await apiService.delete('CMF', id);
+                    showMsg('刪除成功', 'success');
+                    setSelectedCustomer(null);
+                } catch (e) { showMsg('失敗', 'error'); } finally { setLoading(false); }
+            };
+
+            const openPrxModal = (p = null, customerOverride = null) => {
+                const targetCustomer = customerOverride || selectedCustomer;
+                if (!targetCustomer) return;
+                const isView = !isAdmin && p !== null;
+                setIsViewOnly(isView);
+                setMode(p ? 'edit' : 'add');
+                setEditingData(p ? { ...p } : {
+                    CID1: targetCustomer.CID1, NAME: targetCustomer.NAME, TEL: targetCustomer.TEL, DATE: new Date().toISOString().split('T')[0]
+                });
+                setIsPrxModalOpen(true);
+            };
+
+            const savePrx = async () => {
+                if (!isAdmin) return;
+                setLoading(true);
+                const dataToSave = { ...editingData };
+                // Ensure CID1 is string
+                dataToSave.CID1 = String(dataToSave.CID1);
+
+                try {
+                    if (mode === 'add') {
+                        const tempPrx = { ...dataToSave, id: 'temp_' + Date.now() };
+                        setAllPrescriptions(prev => [...prev, tempPrx]);
+                        const res = await apiService.create('PRXMF', dataToSave);
+                        if (res.status === 'success') setAllPrescriptions(prev => prev.map(p => p.id === tempPrx.id ? res.data : p));
+                    } else {
+                        setAllPrescriptions(prev => prev.map(p => p.id === dataToSave.id ? dataToSave : p));
+                        await apiService.update('PRXMF', dataToSave.id, dataToSave);
+                    }
+                    setIsPrxModalOpen(false); showMsg('儲存成功', 'success');
+                } catch (e) { showMsg('失敗', 'error'); } finally { setLoading(false); }
+            };
+
+            const deletePrx = async (id) => {
+                if (!isAdmin || !confirm('確定刪除?')) return;
+                setLoading(true);
+                try {
+                    setAllPrescriptions(prev => prev.filter(p => p.id !== id));
+                    await apiService.delete('PRXMF', id);
+                    showMsg('刪除成功', 'success');
+                } catch (e) { showMsg('失敗', 'error'); } finally { setLoading(false); }
+            };
+
+            // Admin & CSV logic
+            const fetchSystemUsers = async () => {
+                if (!isAdmin) return; setLoading(true);
+                const { getDocs, collection } = window.firebaseModules;
+                const q = collection(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users');
+                const snap = await getDocs(q);
+                setSystemUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                setLoading(false);
+            };
+            const addUser = async (email) => { if (!email) return; const { addDoc, collection } = window.firebaseModules; await addDoc(collection(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users'), { email, role: 'user', addedAt: new Date().toISOString() }); fetchSystemUsers(); };
+            const removeUser = async (id) => { const { deleteDoc, doc } = window.firebaseModules; await deleteDoc(doc(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users', id)); fetchSystemUsers(); };
+            const updateUserRole = async (id, role) => { const { updateDoc, doc } = window.firebaseModules; await updateDoc(doc(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users', id), { role }); showMsg('已更新', 'success'); fetchSystemUsers(); };
+
+            const exportCSV = (type) => {
+                const data = type === 'CMF' ? customers : allPrescriptions;
+                if (!data.length) { alert('無資料'); return; }
+                const sorted = [...data].sort((a, b) => String(a.CID1 || '').localeCompare(String(b.CID1 || ''), undefined, { numeric: true }));
+                const today = new Date().toISOString().split('T')[0];
+                const filename = `${type}_${today}.csv`;
+                let exportHeaders = type === 'CMF' ? CMF_FIELDS.map(f => f.key) : ['CID1', 'NAME', ...PRXMF_FIELDS_KEYS];
+                const content = [exportHeaders.join(','), ...sorted.map(row => exportHeaders.map(f => `"${String(row[f] || '').replace(/"/g, '""')}"`).join(','))].join('\n');
+                const url = URL.createObjectURL(new Blob(["\uFEFF" + content], { type: 'text/csv;charset=utf-8' }));
+                const link = document.createElement("a"); link.href = url; link.download = filename; link.click();
+            };
+
+            const showMsg = (text, type) => { setMsg({ text, type }); setTimeout(() => setMsg({ text: '', type: '' }), 3000); };
+
+            if (!isFirebaseReady) return <div className="min-h-screen flex items-center justify-center"><LoadingSpinner /></div>;
+            if (!user) return (
+                <div className="min-h-screen flex items-center justify-center bg-gray-100 relative">
+                    {authError && <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-[80] p-4"><div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6"><h3 className="text-xl font-bold text-red-600 mb-4 flex items-center">⚠️ 網域授權錯誤</h3><div className="bg-gray-100 p-3 rounded text-lg font-mono border-2 border-blue-200 text-blue-800 select-all break-all mb-4">{authError.domain}</div><div className="flex justify-end space-x-3"><button onClick={() => { navigator.clipboard.writeText(authError.domain); alert('已複製'); }} className="px-4 py-2 bg-blue-100 text-blue-700 rounded">複製網域</button><button onClick={() => setAuthError(null)} className="px-4 py-2 bg-gray-600 text-white rounded">關閉視窗</button></div></div></div>}
+                    <div className="bg-white p-8 rounded shadow-lg max-w-md w-full">
+                        <h1 className="text-2xl font-bold mb-4 text-center">鐘錶眼鏡客戶管理系統</h1>
+                        <button onClick={handleGoogleLogin} className="w-full bg-white border border-gray-300 text-gray-700 py-2 px-4 rounded flex items-center justify-center hover:bg-gray-50 transition shadow-sm"><img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5 mr-2" /> 使用 Google 帳號登入</button>
+                    </div>
+                </div>
+            );
+
+            const renderContent = () => {
+                if (userRole === 'pending') return <div className="flex flex-col items-center justify-center h-full text-gray-500"><Lock className="w-16 h-16 mb-4" /><h2 className="text-2xl font-bold">帳號審核中</h2><p>請聯繫管理員開通權限。</p></div>;
+                if (activeTab === 'search' && !selectedCustomer) return <SearchView searchCriteria={searchCriteria} setSearchCriteria={setSearchCriteria} handleSearch={handleSearch} hasSearched={hasSearched} customers={customers} isAdmin={isAdmin} openCustomerModal={openCustomerModal} setSelectedCustomer={setSelectedCustomer} deleteCustomer={deleteCustomer} prxCounts={prxCounts} currentPage={currentPage} totalPages={totalPages} totalCount={totalCount} setPage={setCurrentPage} />;
+                if (selectedCustomer) return <CustomerDetailView selectedCustomer={selectedCustomer} isAdmin={isAdmin} openCustomerModal={openCustomerModal} openPrxModal={openPrxModal} deletePrx={deletePrx} customerPrescriptions={customerPrescriptions} />;
+                if (activeTab === 'admin' && isAdmin) return <AdminPanelView exportCSV={exportCSV} systemUsers={systemUsers} addUser={addUser} updateUserRole={updateUserRole} removeUser={removeUser} />;
+                return null;
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col relative">
+                    {loading && <div className="fixed inset-0 bg-black bg-opacity-30 z-[70] flex flex-col items-center justify-center text-white"><LoadingSpinner /><p className="text-lg font-bold">處理中...</p></div>}
+                    <header className="bg-blue-800 text-white p-4 shadow flex justify-between items-center">
+                        <div className="text-xl font-bold flex items-center cursor-pointer" onClick={() => { setSelectedCustomer(null); setActiveTab('search'); }}><Eye className="mr-2" /> 客戶管理系統</div>
+                        <div className="flex items-center gap-4 text-sm"><span>{user.email} <span className="bg-yellow-500 text-blue-900 px-1 rounded ml-1">{userRole === 'admin' ? '管理員' : userRole === 'pending' ? '未授權' : '使用者'}</span></span><button onClick={handleLogout}><LogOut /></button></div>
+                    </header>
+                    <nav className="bg-white shadow border-b flex">
+                        <button className={`px-6 py-3 border-b-2 ${activeTab === 'search' ? 'border-blue-600 text-blue-600' : ''}`} onClick={() => { setSelectedCustomer(null); setActiveTab('search'); }}>客戶查詢</button>
+                        {selectedCustomer && <button className="px-6 py-3 border-b-2 border-blue-600 text-blue-600">{selectedCustomer.NAME}</button>}
+                        {isAdmin && <button className={`px-6 py-3 border-b-2 ${activeTab === 'admin' ? 'border-blue-600 text-blue-600' : ''}`} onClick={() => { setSelectedCustomer(null); setActiveTab('admin'); fetchSystemUsers(); }}>系統管理</button>}
+                    </nav>
+                    {msg.text && <div className={`fixed top-4 right-4 p-4 rounded shadow text-white z-50 ${msg.type === 'success' ? 'bg-green-500' : 'bg-red-500'}`}>{msg.text}</div>}
+                    <main className="flex-1 container mx-auto p-4 overflow-y-auto">{renderContent()}</main>
+
+                    {/* Customer Modal */}
+                    {isCustomerModalOpen && (
+                        <Modal title={mode === 'add' ? "新增客戶" : "編輯客戶"} onClose={() => setIsCustomerModalOpen(false)}>
+                            <form onSubmit={(e) => { e.preventDefault(); saveCustomer(); }} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {CMF_FIELDS.map(field => (
+                                    <div key={field.key} className={field.className}>
+                                        <label className="block text-sm font-bold text-gray-500 mb-1">{field.label}</label>
+                                        {field.key === 'ADDRESS' ? (
+                                            <div className="space-y-2">
+                                                <div className="flex space-x-2">
+                                                    <select className="border p-1 rounded w-1/3" value={addrCity} onChange={e => { setAddrCity(e.target.value); setAddrDist(''); }}>
+                                                        <option value="">縣市</option>{Object.keys(TAIWAN_CITIES).map(c => <option key={c} value={c}>{c}</option>)}
+                                                    </select>
+                                                    <select className="border p-1 rounded w-1/3" value={addrDist} onChange={e => setAddrDist(e.target.value)}>
+                                                        <option value="">行政區</option>{addrCity && TAIWAN_CITIES[addrCity]?.map(d => <option key={d} value={d}>{d}</option>)}
+                                                    </select>
+                                                    <div className="w-1/3">
+                                                        <select className="border p-1 rounded w-full" value={addrRoad} onChange={e => handleRoadChange(e.target.value)}>
+                                                            <option value="">道路 (選後加入)</option>{(addrDist && TAINAN_ROADS[addrDist] ? TAINAN_ROADS[addrDist] : COMMON_ROADS).map(r => <option key={r} value={r}>{r}</option>)}
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                                <input className="border w-full p-1 rounded" value={editingData.ADDRESS || ''} onChange={e => setEditingData({ ...editingData, ADDRESS: e.target.value })} placeholder="詳細地址 (系統會將上方選單內容自動串接至此)" />
+                                            </div>
+                                        ) : field.isDateAppendable ? (
+                                            <div className="flex gap-1">
+                                                <input type="text" className="border w-full p-1 rounded" value={editingData[field.key] || ''} onChange={e => setEditingData({ ...editingData, [field.key]: e.target.value })} />
+                                                <div className="relative w-8">
+                                                    <input type="date" className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" onChange={(e) => handleDateAppend(field.key, e.target.value)} />
+                                                    <button type="button" className="w-full h-full bg-gray-100 border rounded hover:bg-gray-200 flex items-center justify-center"><Calendar className="w-5 h-5 text-gray-600" /></button>
+                                                </div>
+                                            </div>
+                                        ) : field.type === 'select' ? (
+                                            <select className="border w-full p-1 rounded" value={editingData[field.key] !== undefined ? editingData[field.key] : 1} onChange={e => setEditingData({ ...editingData, [field.key]: e.target.value })}>{field.options.map(o => <option key={o.val} value={o.val}>{o.label}</option>)}</select>
+                                        ) : (
+                                            <input type={field.type} className="border w-full p-1 rounded" value={editingData[field.key] || ''} onChange={e => setEditingData({ ...editingData, [field.key]: e.target.value })} required={field.required} />
+                                        )}
+                                    </div>
+                                ))}
+                                <div className="col-span-1 md:col-span-2 mt-4 flex justify-end space-x-3">
+                                    <button type="button" onClick={() => setIsCustomerModalOpen(false)} className="px-4 py-2 border rounded">取消</button>
+                                    <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">儲存</button>
+                                </div>
+                            </form>
+                        </Modal>
+                    )}
+
+                    {/* Prx Modal */}
+                    {isPrxModalOpen && (
+                        <Modal title={isViewOnly ? "驗光資料 (唯讀)" : (mode === 'add' ? "新增驗光資料" : "編輯驗光資料")} onClose={() => setIsPrxModalOpen(false)} size="large">
+                            <form onSubmit={(e) => { e.preventDefault(); if (!isViewOnly) savePrx(); }} className="space-y-4">
+                                <fieldset disabled={isViewOnly} className="space-y-4">
+                                    <div className="grid grid-cols-3 gap-2 bg-gray-50 p-2 rounded">
+                                        <div><label className="text-xs font-bold text-gray-500">日期</label><input type="date" className="border w-full rounded p-1" value={editingData.DATE || ''} onChange={e => setEditingData({ ...editingData, DATE: e.target.value })} /></div>
+                                        <div><label className="text-xs font-bold text-gray-500">編號</label><input className="border w-full rounded p-1 bg-gray-100" value={editingData.CID1 || ''} readOnly /></div>
+                                        <div><label className="text-xs font-bold text-gray-500">姓名</label><input className="border w-full rounded p-1 bg-gray-100" value={editingData.NAME || ''} readOnly /></div>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div className="border border-red-200 rounded p-3 bg-red-50">
+                                            <div className="font-bold text-red-800 mb-2 border-b border-red-200 text-lg">右眼 (R)</div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {['RSPH', 'RCYL', 'RAXIS', 'RADD', 'RBCH', 'RBCV', 'RBRVISE1', 'RBRVISE2'].map(k => <div key={k}><label className="text-xs">{k.replace('R', '')}</label><input className="border w-full rounded p-1" value={editingData[k] || ''} onChange={e => setEditingData({ ...editingData, [k]: e.target.value })} /></div>)}
+                                                <div className="col-span-3"><label className="text-xs">隱形眼鏡 (R-ITEM)</label><input className="border w-full rounded p-1" value={editingData.RITEM || ''} onChange={e => setEditingData({ ...editingData, RITEM: e.target.value })} /></div>
+                                            </div>
+                                        </div>
+                                        <div className="border border-blue-200 rounded p-3 bg-blue-50">
+                                            <div className="font-bold text-blue-800 mb-2 border-b border-blue-200 text-lg">左眼 (L)</div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {['LSPH', 'LCYL', 'LAXIS', 'LADD', 'LBCH', 'LBCV', 'LBRVISE1', 'LBRVISE2'].map(k => <div key={k}><label className="text-xs">{k.replace('L', '')}</label><input className="border w-full rounded p-1" value={editingData[k] || ''} onChange={e => setEditingData({ ...editingData, [k]: e.target.value })} /></div>)}
+                                                <div className="col-span-3"><label className="text-xs">隱形眼鏡 (L-ITEM)</label><input className="border w-full rounded p-1" value={editingData.LITEM || ''} onChange={e => setEditingData({ ...editingData, LITEM: e.target.value })} /></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 border-t pt-4">
+                                        <div><label className="text-xs font-bold text-gray-500">瞳距 (PD)</label><input className="border w-full rounded p-1" value={editingData.PD || ''} onChange={e => setEditingData({ ...editingData, PD: e.target.value })} /></div>
+                                        <div><label className="text-xs font-bold text-gray-500">年齡 (AGE)</label><input type="number" className="border w-full rounded p-1" value={editingData.AGE || ''} onChange={e => setEditingData({ ...editingData, AGE: e.target.value })} /></div>
+                                        <div className="col-span-2"><label className="text-xs font-bold text-gray-500">鏡框/鏡片 (ITEM)</label><input className="border w-full rounded p-1" value={editingData.ITEM || ''} onChange={e => setEditingData({ ...editingData, ITEM: e.target.value })} /></div>
+                                        {['REMARK', 'REMARK2', 'REMARK3'].map(k => <div key={k} className="col-span-2 md:col-span-4"><label className="text-xs font-bold text-gray-500">{k}</label><input className="border w-full rounded p-1" value={editingData[k] || ''} onChange={e => setEditingData({ ...editingData, [k]: e.target.value })} /></div>)}
+                                    </div>
+                                </fieldset>
+                                <div className="flex justify-end space-x-3 pt-4 border-t">
+                                    <button type="button" onClick={() => setIsPrxModalOpen(false)} className="px-4 py-2 border rounded text-gray-600 hover:bg-gray-50">{isViewOnly ? "關閉" : "取消"}</button>
+                                    {!isViewOnly && <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">儲存</button>}
+                                </div>
+                            </form>
+                        </Modal>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(
+            <ErrorBoundary>
+                <App />
+            </ErrorBoundary>
+        );
+    </script>
+</body>
+
+</html>
