@@ -343,7 +343,7 @@
                                             <td className="p-2 text-center">{c.SEX == 0 ? '女' : c.SEX == 2 ? '其他' : '男'}</td>
                                             <td className="p-2">{String(c.TEL || '')}</td>
                                             <td className="p-2">{String(c.BIRDATE || '')}</td>
-                                            <td className="p-2 text-center font-bold">{prxCounts[String(c.CID1 || '').trim()] || 0}</td>
+                                            <td className="p-2 text-center font-bold">{(() => { const count = prxCounts[String(c.CID1 || '').trim()]; return count === undefined || count === '' ? '' : count; })()}</td>
                                             <td className="p-2 flex gap-2 justify-center">
                                                 <button onClick={() => { setSelectedCustomer(c) }} className="text-blue-600 hover:text-blue-800" title="詳細資料"><FileText /></button>
                                                 {isAdmin && <><button onClick={() => openCustomerModal(c)} className="text-green-600 hover:text-green-800"><Edit /></button><button onClick={() => deleteCustomer(c.id, c.CID1)} className="text-red-600 hover:text-red-800"><Trash2 /></button></>}
@@ -588,9 +588,10 @@
                             prxData.sort((a, b) => new Date(b.DATE) - new Date(a.DATE));
                             setCustomerPrescriptions(prxData);
                             setAllPrescriptions(prxData); // 暫存到 allPrescriptions 供新增/編輯使用
-                            
-                            // 2. 呼叫 getPrxCount 更新 CMF 的 prxCount 欄位
-                            await apiService.getPrxCount(selectedCustomer.CID1);
+
+                            // prxCount 改為本地計算，不再等待 API 回應
+                            // 背景更新 CMF 的 prxCount 欄位（不 await，不阻塞畫面）
+                            apiService.getPrxCount(selectedCustomer.CID1);
                         } catch (e) {
                             console.error('載入客戶驗光資料失敗:', e);
                             setCustomerPrescriptions([]);
