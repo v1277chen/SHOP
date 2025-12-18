@@ -119,7 +119,7 @@ function formatValue(key, value) {
  */
 /**
  * 讀取資料 (Read) - 支援分頁與搜尋
- * [Modified] 若為 CMF 表，額外計算 PRXMF 的筆數 (Server-side Count Aggregation)
+ * [Optimized] 使用 TextFinder 在 Sheet 層級做搜尋，大幅提升效能
  * @param {Spreadsheet} ss - 試算表物件
  * @param {string} sheetName - 工作表名稱
  * @param {number} page - 目前頁碼 (從 1 開始)
@@ -129,59 +129,88 @@ function formatValue(key, value) {
  */
 function readSheet(ss, sheetName, page, pageSize, searchParams) {
   const sheet = getOrCreateSheet(ss, sheetName);
-  const dataRange = sheet.getDataRange();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
   
   // 若試算表完全空白，回傳空結果
-  if (dataRange.getLastRow() === 0) return { status: 'success', data: [], total: 0, page: 1, totalPages: 0 };
+  if (lastRow === 0) return { status: 'success', data: [], total: 0, page: 1, totalPages: 0 };
   
-  const rawData = dataRange.getValues();
-  // 第一列為標題 (Header)
-  const headers = rawData[0];
+  // 取得標題列
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
   
-  // 將其餘列轉換為物件陣列 JSON 格式
-  // 從第 2 列開始 (Index 1) 為數據
-  let allRows = [];
-  for (let i = 1; i < rawData.length; i++) {
-    const rowObj = {};
-    let hasData = false; // 標記該列是否有有效數據
-    
-    for (let j = 0; j < headers.length; j++) {
-      const header = headers[j];
-      const val = rawData[i][j];
-      
-      // 轉換日期物件為 ISO 字串，方便前端處理
-      if (val instanceof Date) {
-        rowObj[header] = val.toISOString();
-      } else {
-        rowObj[header] = String(val);
-      }
-
-      if (val !== "") hasData = true;
-    }
-    
-    // 只有當該列有資料時才加入結果 (略過空行)
-    if (hasData) {
-      allRows.push(rowObj);
-    }
-  }
-
-  // --- 搜尋過濾邏輯 ---
+  // 決定要讀取的列號集合
+  let targetRowNumbers = null; // null 代表全部讀取
+  
+  // --- 使用 TextFinder 優化搜尋 ---
   if (searchParams && Object.keys(searchParams).length > 0) {
-    allRows = allRows.filter(item => {
-      // 檢查每一個搜尋條件
-      return Object.keys(searchParams).every(key => {
-        const queryVal = String(searchParams[key] || '').toLowerCase().trim();
-        // 若搜尋條件為空，則忽略該條件
-        if (!queryVal) return true;
+    const searchKeys = Object.keys(searchParams).filter(k => searchParams[k] && String(searchParams[k]).trim());
+    
+    if (searchKeys.length > 0) {
+      // 對每個搜尋條件用 TextFinder 找出符合的列
+      let matchedRowSets = [];
+      
+      for (const key of searchKeys) {
+        const searchVal = String(searchParams[key]).trim();
+        const colIndex = headers.indexOf(key);
         
-        // 取得資料中的值
-        const itemVal = String(item[key] || '').toLowerCase();
+        if (colIndex === -1 || !searchVal) continue;
         
-        // 使用模糊搜尋 (Includes)
-        return itemVal.includes(queryVal);
-      });
-    });
+        // 用 TextFinder 搜尋該欄位 (只搜資料區，不含標題列)
+        const searchRange = sheet.getRange(2, colIndex + 1, lastRow - 1, 1);
+        const finder = searchRange.createTextFinder(searchVal)
+          .matchCase(false)           // 不區分大小寫
+          .matchEntireCell(false);    // 模糊搜尋 (部分匹配)
+        
+        const matches = finder.findAll();
+        const rowSet = new Set(matches.map(cell => cell.getRow()));
+        matchedRowSets.push(rowSet);
+      }
+      
+      // 取所有條件的交集 (AND 邏輯)
+      if (matchedRowSets.length > 0) {
+        targetRowNumbers = matchedRowSets.reduce((acc, set) => {
+          return new Set([...acc].filter(x => set.has(x)));
+        });
+      } else {
+        // 搜尋條件都無效，回傳空
+        targetRowNumbers = new Set();
+      }
+    }
   }
+  
+  // --- 讀取資料 ---
+  let allRows = [];
+  
+  if (targetRowNumbers === null) {
+    // 無搜尋條件，讀取全部資料
+    const rawData = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    allRows = convertToObjects(rawData, headers);
+  } else if (targetRowNumbers.size > 0) {
+    // 有搜尋結果，只讀取符合條件的列
+    const sortedRows = Array.from(targetRowNumbers).sort((a, b) => a - b);
+    
+    // 批次讀取優化：如果符合的列很多，分批讀取避免太多 API 呼叫
+    if (sortedRows.length > 50) {
+      // 符合列數較多時，一次讀全部再篩選（避免多次 getRange 呼叫）
+      const rawData = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+      const rowSet = new Set(sortedRows);
+      for (let i = 0; i < rawData.length; i++) {
+        const actualRow = i + 2; // rawData index 0 = sheet row 2
+        if (rowSet.has(actualRow)) {
+          const rowObj = convertRowToObject(rawData[i], headers);
+          if (rowObj) allRows.push(rowObj);
+        }
+      }
+    } else {
+      // 符合列數較少，逐列讀取更有效率
+      for (const rowNum of sortedRows) {
+        const rowData = sheet.getRange(rowNum, 1, 1, lastCol).getValues()[0];
+        const rowObj = convertRowToObject(rowData, headers);
+        if (rowObj) allRows.push(rowObj);
+      }
+    }
+  }
+  // else: targetRowNumbers.size === 0，沒有符合的資料，allRows 維持空陣列
 
   // --- 分頁邏輯 ---
   const totalCount = allRows.length;
@@ -190,14 +219,10 @@ function readSheet(ss, sheetName, page, pageSize, searchParams) {
 
   if (pageSize > 0) {
     const startIndex = (page - 1) * pageSize;
-    // 使用 slice 截取當頁資料
     pagedData = allRows.slice(startIndex, startIndex + pageSize);
     totalPages = Math.ceil(totalCount / pageSize);
   }
 
-  // prxCount 已移至獨立的 getPrxCount action，搜尋時不再計算
-
-  // 回傳完整結構
   return { 
     status: 'success', 
     data: pagedData, 
@@ -206,6 +231,47 @@ function readSheet(ss, sheetName, page, pageSize, searchParams) {
     totalPages: totalPages,
     pageSize: pageSize 
   };
+}
+
+/**
+ * 將二維陣列轉換為物件陣列
+ * @param {Array} rawData - 二維陣列資料
+ * @param {Array} headers - 標題列
+ * @return {Array} 物件陣列
+ */
+function convertToObjects(rawData, headers) {
+  const result = [];
+  for (let i = 0; i < rawData.length; i++) {
+    const rowObj = convertRowToObject(rawData[i], headers);
+    if (rowObj) result.push(rowObj);
+  }
+  return result;
+}
+
+/**
+ * 將單列資料轉換為物件
+ * @param {Array} row - 單列資料
+ * @param {Array} headers - 標題列
+ * @return {Object|null} 物件或 null (空列)
+ */
+function convertRowToObject(row, headers) {
+  const rowObj = {};
+  let hasData = false;
+  
+  for (let j = 0; j < headers.length; j++) {
+    const header = headers[j];
+    const val = row[j];
+    
+    if (val instanceof Date) {
+      rowObj[header] = val.toISOString();
+    } else {
+      rowObj[header] = String(val);
+    }
+    
+    if (val !== "") hasData = true;
+  }
+  
+  return hasData ? rowObj : null;
 }
 
 /**
