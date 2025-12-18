@@ -72,6 +72,7 @@ function handleRequest(e) {
     else if (reqAction === 'createBatch') result = createBatch(ss, reqSheet, reqData);
     else if (reqAction === 'update') result = updateRow(ss, reqSheet, reqId, reqData);
     else if (reqAction === 'delete') result = deleteRow(ss, reqSheet, reqId);
+    else if (reqAction === 'getPrxCount') result = getPrxCount(ss, reqId); // reqId = CID1
     else result = { status: 'error', message: 'Unknown action: ' + reqAction };
 
     // 設定回傳格式為 JSON
@@ -194,44 +195,7 @@ function readSheet(ss, sheetName, page, pageSize, searchParams) {
     totalPages = Math.ceil(totalCount / pageSize);
   }
 
-  // --- [NEW] 優化：若讀取的是 CMF，順便計算 PRXMF 筆數 (prxCount) ---
-  if (sheetName === 'CMF' && pagedData.length > 0) {
-    try {
-      const prxSheet = ss.getSheetByName('PRXMF');
-      if (prxSheet && prxSheet.getLastRow() > 1) {
-        // 優化技巧：只讀取 CID1 欄位來計算，避免載入整個 PRXMF 表
-        const prxHeaders = prxSheet.getRange(1, 1, 1, prxSheet.getLastColumn()).getValues()[0];
-        const cidIndex = prxHeaders.indexOf('CID1');
-        
-        if (cidIndex !== -1) {
-          // 讀取 CID1 直欄的所有數據 (從第 2 列開始)
-          // 這裡假設 PRXMF 不會超過 GAS 的記憶體上限 (通常 5-10萬筆內可接受)
-          const cidValues = prxSheet.getRange(2, cidIndex + 1, prxSheet.getLastRow() - 1, 1).getValues();
-          
-          // 建立當前頁面 CID 的 Set 以加速比對
-          const targetCids = new Set(pagedData.map(c => String(c.CID1 || '').trim()));
-          const countMap = {};
-
-          // 遍歷所有驗光資料的 CID1，若是目標客戶則計數
-          for (let k = 0; k < cidValues.length; k++) {
-            const prxCid = String(cidValues[k][0]).trim();
-            if (targetCids.has(prxCid)) {
-              countMap[prxCid] = (countMap[prxCid] || 0) + 1;
-            }
-          }
-
-          // 將計算結果寫回 pagedData
-          pagedData.forEach(c => {
-            const id = String(c.CID1 || '').trim();
-            c.prxCount = countMap[id] || 0;
-          });
-        }
-      }
-    } catch(e) {
-      // 若計算失敗 (例如 PRXMF 不存在)，不影響主流程，僅 console.error (GAS看得到)
-      Logger.log("Count aggregation failed: " + e);
-    }
-  }
+  // prxCount 已移至獨立的 getPrxCount action，搜尋時不再計算
 
   // 回傳完整結構
   return { 
@@ -404,6 +368,67 @@ function deleteRow(ss, sheetName, id) {
     }
   }
   return { status: 'error', message: 'ID not found' };
+}
+
+/**
+ * 取得指定客戶的驗光紀錄筆數，並回寫至 CMF 表的 prxCount 欄位
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {string} cid1 - 客戶編號 (CID1)
+ * @return {Object} 包含 prxCount 的結果
+ */
+function getPrxCount(ss, cid1) {
+  if (!cid1) return { status: 'error', message: 'CID1 is required' };
+  
+  const targetCid = String(cid1).trim();
+  let prxCount = 0;
+
+  try {
+    // 1. 計算 PRXMF 表中該客戶的筆數
+    const prxSheet = ss.getSheetByName('PRXMF');
+    if (prxSheet && prxSheet.getLastRow() > 1) {
+      const prxHeaders = prxSheet.getRange(1, 1, 1, prxSheet.getLastColumn()).getValues()[0];
+      const cidIndex = prxHeaders.indexOf('CID1');
+      
+      if (cidIndex !== -1) {
+        const cidValues = prxSheet.getRange(2, cidIndex + 1, prxSheet.getLastRow() - 1, 1).getValues();
+        for (let i = 0; i < cidValues.length; i++) {
+          if (String(cidValues[i][0]).trim() === targetCid) {
+            prxCount++;
+          }
+        }
+      }
+    }
+
+    // 2. 將 prxCount 回寫至 CMF 表
+    const cmfSheet = ss.getSheetByName('CMF');
+    if (cmfSheet && cmfSheet.getLastRow() > 1) {
+      const cmfHeaders = cmfSheet.getRange(1, 1, 1, cmfSheet.getLastColumn()).getValues()[0];
+      const cmfCidIndex = cmfHeaders.indexOf('CID1');
+      let prxCountIndex = cmfHeaders.indexOf('prxCount');
+      
+      // 若 prxCount 欄位不存在，則新增
+      if (prxCountIndex === -1) {
+        prxCountIndex = cmfHeaders.length;
+        cmfSheet.getRange(1, prxCountIndex + 1).setValue('prxCount');
+      }
+      
+      // 找到該客戶的列並更新 prxCount
+      if (cmfCidIndex !== -1) {
+        const cmfData = cmfSheet.getRange(2, 1, cmfSheet.getLastRow() - 1, cmfSheet.getLastColumn()).getValues();
+        for (let i = 0; i < cmfData.length; i++) {
+          if (String(cmfData[i][cmfCidIndex]).trim() === targetCid) {
+            cmfSheet.getRange(i + 2, prxCountIndex + 1).setValue(prxCount);
+            break;
+          }
+        }
+      }
+    }
+
+    return { status: 'success', cid1: targetCid, prxCount: prxCount };
+  } catch (e) {
+    Logger.log('getPrxCount error: ' + e);
+    return { status: 'error', message: e.toString(), prxCount: prxCount };
+  }
 }
 
 // --- 輔助函式 (Helper Functions) ---
