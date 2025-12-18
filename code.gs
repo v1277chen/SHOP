@@ -73,6 +73,7 @@ function handleRequest(e) {
     else if (reqAction === 'update') result = updateRow(ss, reqSheet, reqId, reqData);
     else if (reqAction === 'delete') result = deleteRow(ss, reqSheet, reqId);
     else if (reqAction === 'getPrxCount') result = getPrxCount(ss, reqId); // reqId = CID1
+    else if (reqAction === 'updateAllPrxCount') result = updateAllPrxCount(ss); // 批次更新所有 prxCount
     else result = { status: 'error', message: 'Unknown action: ' + reqAction };
 
     // 設定回傳格式為 JSON
@@ -497,6 +498,73 @@ function getPrxCount(ss, cid1) {
   } catch (e) {
     Logger.log('getPrxCount error: ' + e);
     return { status: 'error', message: e.toString(), prxCount: prxCount };
+  }
+}
+
+/**
+ * 批次更新所有客戶的驗光紀錄筆數
+ * 一次性計算 PRXMF 中每個 CID1 的數量，並批次回寫到 CMF 表的 prxCount 欄位
+ * @param {Spreadsheet} ss - 試算表物件
+ * @return {Object} 更新結果
+ */
+function updateAllPrxCount(ss) {
+  try {
+    const cmfSheet = ss.getSheetByName('CMF');
+    const prxSheet = ss.getSheetByName('PRXMF');
+    
+    if (!cmfSheet || cmfSheet.getLastRow() <= 1) {
+      return { status: 'success', message: 'No CMF data', updated: 0 };
+    }
+    
+    // 1. 計算 PRXMF 中每個 CID1 的出現次數
+    const prxCountMap = {};
+    if (prxSheet && prxSheet.getLastRow() > 1) {
+      const prxHeaders = prxSheet.getRange(1, 1, 1, prxSheet.getLastColumn()).getValues()[0];
+      const prxCidIndex = prxHeaders.indexOf('CID1');
+      
+      if (prxCidIndex !== -1) {
+        const prxCidValues = prxSheet.getRange(2, prxCidIndex + 1, prxSheet.getLastRow() - 1, 1).getValues();
+        for (let i = 0; i < prxCidValues.length; i++) {
+          const cid = String(prxCidValues[i][0]).trim();
+          if (cid) {
+            prxCountMap[cid] = (prxCountMap[cid] || 0) + 1;
+          }
+        }
+      }
+    }
+    
+    // 2. 讀取 CMF 表頭
+    const cmfHeaders = cmfSheet.getRange(1, 1, 1, cmfSheet.getLastColumn()).getValues()[0];
+    const cmfCidIndex = cmfHeaders.indexOf('CID1');
+    let prxCountIndex = cmfHeaders.indexOf('prxCount');
+    
+    // 若 prxCount 欄位不存在，則新增
+    if (prxCountIndex === -1) {
+      prxCountIndex = cmfHeaders.length;
+      cmfSheet.getRange(1, prxCountIndex + 1).setValue('prxCount');
+    }
+    
+    // 3. 讀取所有 CMF 資料
+    const cmfData = cmfSheet.getRange(2, 1, cmfSheet.getLastRow() - 1, cmfSheet.getLastColumn()).getValues();
+    
+    // 4. 準備批次更新資料 (只需要 prxCount 欄位的值)
+    const updateValues = cmfData.map(row => {
+      const cid = String(row[cmfCidIndex]).trim();
+      return [prxCountMap[cid] || 0];
+    });
+    
+    // 5. 批次寫入 prxCount 欄位
+    cmfSheet.getRange(2, prxCountIndex + 1, updateValues.length, 1).setValues(updateValues);
+    
+    return { 
+      status: 'success', 
+      message: 'All prxCount updated', 
+      updated: updateValues.length,
+      prxCountMap: prxCountMap // 回傳統計資料供前端使用
+    };
+  } catch (e) {
+    Logger.log('updateAllPrxCount error: ' + e);
+    return { status: 'error', message: e.toString() };
   }
 }
 
