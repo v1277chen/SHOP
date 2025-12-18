@@ -119,22 +119,36 @@
            MODULE: Services.js (服務層)
            用途：封裝 GAS API 呼叫與錯誤處理
            ========================================================================== */
+        /**
+         * API 服務層：封裝所有與後端 GAS 的 CRUD 通訊
+         * [SECURITY] 所有請求都會帶上 Firebase ID Token 進行身份驗證
+         */
         const apiService = {
             /**
-             * 讀取資料 (Read)
-             * @param {string} sheet - 表格名稱 (CMF: 客戶, PRXMF: 驗光)
-             * @param {number} page - 頁碼
-             * @param {number} pageSize - 每頁筆數
-             * @param {Object} search - 搜尋條件物件
+             * 取得當前登入用戶的 Firebase ID Token
+             * @returns {Promise<string>} ID Token
              */
+            getIdToken: async () => {
+                const auth = window.firebaseModules?.getAuth();
+                const user = auth?.currentUser;
+                if (!user) throw new Error('未登入，無法取得 Token');
+                return await user.getIdToken();
+            },
+
             read: async (sheet, page = 1, pageSize = 0, search = {}) => {
                 try {
+                    const idToken = await apiService.getIdToken();
                     // 建構查詢參數字串
                     const searchStr = encodeURIComponent(JSON.stringify(search));
-                    const url = `${GAS_API_URL}?action=read&sheet=${sheet}&page=${page}&pageSize=${pageSize}&search=${searchStr}`;
+                    const url = `${GAS_API_URL}?action=read&sheet=${sheet}&page=${page}&pageSize=${pageSize}&search=${searchStr}&idToken=${encodeURIComponent(idToken)}`;
 
                     const res = await fetch(url);
                     const json = await res.json();
+
+                    // 檢查認證錯誤
+                    if (json.code === 'AUTH_FAILED' || json.code === 'ACCESS_DENIED') {
+                        throw new Error(json.message);
+                    }
 
                     if (json.status === 'success') {
                         // 清理每一個物件中的資料，將 null/undefined 轉為空字串，處理日期格式
@@ -144,14 +158,14 @@
                                 let val = item[key];
                                 // 若為日期字串且包含 'T' (ISO format)，嘗試只取前段日期
                                 // 注意：後端回傳的是 ISO String，這邊簡單處理
-                                if (typeof val === 'string' && val.includes('T') && val.length > 20) {
-                                    // 簡單判斷是否類似 ISO Date String
-                                    // 實際上某些欄位可能是純文字但剛好有 T，這裡假設系統欄位或日期欄位
-                                    // 為了安全起見，這邊可以不做過度轉換，維持原樣或由顯示層處理
-                                    // 但原程式碼邏輯有處理，保留相容性：
-                                    // if (val instanceof Date) ... 但 json 傳回來已經是字串
-                                    // 這裡僅針對特定欄位或維持字串即可，前端顯示時再 substring
-                                }
+                                // if (typeof val === 'string' && val.includes('T') && val.length > 20) {
+                                //     // 簡單判斷是否類似 ISO Date String
+                                //     // 實際上某些欄位可能是純文字但剛好有 T，這裡假設系統欄位或日期欄位
+                                //     // 為了安全起見，這邊可以不做過度轉換，維持原樣或由顯示層處理
+                                //     // 但原程式碼邏輯有處理，保留相容性：
+                                //     // if (val instanceof Date) ... 但 json 傳回來已經是字串
+                                //     // 這裡僅針對特定欄位或維持字串即可，前端顯示時再 substring
+                                // }
                                 cleanItem[key] = (val === null || val === undefined) ? '' : String(val);
                             }
                             return cleanItem;
@@ -172,21 +186,25 @@
                 }
             },
             create: async (sheet, data) => {
-                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'create', sheet, data }) });
+                const idToken = await apiService.getIdToken();
+                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'create', sheet, data, idToken }) });
                 return await res.json();
             },
             update: async (sheet, id, data) => {
-                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'update', sheet, id, data }) });
+                const idToken = await apiService.getIdToken();
+                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'update', sheet, id, data, idToken }) });
                 return await res.json();
             },
             delete: async (sheet, id) => {
-                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'delete', sheet, id }) });
+                const idToken = await apiService.getIdToken();
+                const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'delete', sheet, id, idToken }) });
                 return await res.json();
             },
             // [NEW] 取得單一客戶的驗光紀錄數量並回寫至 CMF
             getPrxCount: async (cid1) => {
                 try {
-                    const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'getPrxCount', id: cid1 }) });
+                    const idToken = await apiService.getIdToken();
+                    const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'getPrxCount', id: cid1, idToken }) });
                     return await res.json();
                 } catch (e) {
                     console.error('getPrxCount error:', e);
@@ -196,8 +214,9 @@
             // [NEW] 讀取單一客戶的驗光資料
             readCustomerPrx: async (cid1) => {
                 try {
+                    const idToken = await apiService.getIdToken();
                     const searchStr = encodeURIComponent(JSON.stringify({ CID1: cid1 }));
-                    const url = `${GAS_API_URL}?action=read&sheet=PRXMF&page=1&pageSize=0&search=${searchStr}`;
+                    const url = `${GAS_API_URL}?action=read&sheet=PRXMF&page=1&pageSize=0&search=${searchStr}&idToken=${encodeURIComponent(idToken)}`;
                     const res = await fetch(url);
                     const json = await res.json();
                     if (json.status === 'success') {
@@ -218,7 +237,8 @@
             // [NEW] 批次更新所有客戶的 prxCount
             updateAllPrxCount: async () => {
                 try {
-                    const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'updateAllPrxCount' }) });
+                    const idToken = await apiService.getIdToken();
+                    const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'updateAllPrxCount', idToken }) });
                     return await res.json();
                 } catch (e) {
                     console.error('updateAllPrxCount error:', e);
@@ -628,11 +648,19 @@
                     <div className="bg-white p-6 rounded shadow grid md:grid-cols-2 gap-6">
                         <div className="border p-4">
                             <h3 className="font-bold mb-2 text-blue-600">客戶資料 (CMF)</h3>
-                            <button onClick={() => exportCSV('CMF')} className="w-full bg-gray-100 py-2 mb-2 rounded">匯出 CSV</button>
+                            <button onClick={() => exportCSV('CMF')} className="w-full bg-gray-100 py-2 mb-2 rounded hover:bg-gray-200">匯出 CSV</button>
                         </div>
                         <div className="border p-4">
                             <h3 className="font-bold mb-2 text-green-600">驗光資料 (PRXMF)</h3>
-                            <button onClick={() => exportCSV('PRXMF')} className="w-full bg-gray-100 py-2 mb-2 rounded">匯出 CSV</button>
+                            <button onClick={() => exportCSV('PRXMF')} className="w-full bg-gray-100 py-2 mb-2 rounded hover:bg-gray-200">匯出 CSV</button>
+                        </div>
+                        <div className="border p-4">
+                            <h3 className="font-bold mb-2 text-orange-600">錯誤日誌 (log)</h3>
+                            <button onClick={() => exportCSV('log')} className="w-full bg-orange-50 py-2 mb-2 rounded hover:bg-orange-100 border border-orange-200">匯出 CSV</button>
+                        </div>
+                        <div className="border p-4">
+                            <h3 className="font-bold mb-2 text-purple-600">搜尋日誌 (search)</h3>
+                            <button onClick={() => exportCSV('search')} className="w-full bg-purple-50 py-2 mb-2 rounded hover:bg-purple-100 border border-purple-200">匯出 CSV</button>
                         </div>
                     </div>
                     <div className="bg-white p-6 rounded shadow">
@@ -1070,16 +1098,45 @@
             const removeUser = async (id) => { const { deleteDoc, doc } = window.firebaseModules; await deleteDoc(doc(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users', id)); fetchSystemUsers(); };
             const updateUserRole = async (id, role) => { const { updateDoc, doc } = window.firebaseModules; await updateDoc(doc(appDb, 'artifacts', appIdVal, 'public', 'data', 'sys_users', id), { role }); showMsg('已更新', 'success'); fetchSystemUsers(); };
 
-            const exportCSV = (type) => {
-                const data = type === 'CMF' ? customers : allPrescriptions;
-                if (!data.length) { alert('無資料'); return; }
-                const sorted = [...data].sort((a, b) => String(a.CID1 || '').localeCompare(String(b.CID1 || ''), undefined, { numeric: true }));
-                const today = new Date().toISOString().split('T')[0];
-                const filename = `${type}_${today}.csv`;
-                let exportHeaders = type === 'CMF' ? CMF_FIELDS.map(f => f.key) : ['CID1', 'NAME', ...PRXMF_FIELDS_KEYS];
-                const content = [exportHeaders.join(','), ...sorted.map(row => exportHeaders.map(f => `"${String(row[f] || '').replace(/"/g, '""')}"`).join(','))].join('\n');
-                const url = URL.createObjectURL(new Blob(["\uFEFF" + content], { type: 'text/csv;charset=utf-8' }));
-                const link = document.createElement("a"); link.href = url; link.download = filename; link.click();
+            const exportCSV = async (type) => {
+                setLoading(true);
+                try {
+                    // 讀取全部資料 (pageSize=0)
+                    const res = await apiService.read(type, 1, 0, {});
+                    const data = res.data || [];
+                    if (!data.length) { alert('無資料'); setLoading(false); return; }
+
+                    // 根據類型決定排序和欄位
+                    let sorted, exportHeaders;
+                    if (type === 'CMF') {
+                        sorted = [...data].sort((a, b) => String(a.CID1 || '').localeCompare(String(b.CID1 || ''), undefined, { numeric: true }));
+                        exportHeaders = CMF_FIELDS.map(f => f.key);
+                    } else if (type === 'PRXMF') {
+                        sorted = [...data].sort((a, b) => String(a.CID1 || '').localeCompare(String(b.CID1 || ''), undefined, { numeric: true }));
+                        exportHeaders = ['CID1', 'NAME', ...PRXMF_FIELDS_KEYS];
+                    } else if (type === 'log') {
+                        sorted = [...data].sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+                        exportHeaders = ['timestamp', 'email', 'action', 'sheet', 'targetId', 'status', 'message', 'duration_ms'];
+                    } else if (type === 'search') {
+                        sorted = [...data].sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+                        exportHeaders = ['timestamp', 'email', 'sheet', 'searchCriteria', 'resultCount', 'duration_ms'];
+                    } else {
+                        // 其他類型：使用資料的所有鍵作為欄位
+                        sorted = data;
+                        exportHeaders = data.length > 0 ? Object.keys(data[0]) : [];
+                    }
+
+                    const today = new Date().toISOString().split('T')[0];
+                    const filename = `${type}_${today}.csv`;
+                    const content = [exportHeaders.join(','), ...sorted.map(row => exportHeaders.map(f => `"${String(row[f] || '').replace(/"/g, '""')}"`).join(','))].join('\n');
+                    const url = URL.createObjectURL(new Blob(["\uFEFF" + content], { type: 'text/csv;charset=utf-8' }));
+                    const link = document.createElement("a"); link.href = url; link.download = filename; link.click();
+                    showMsg(`${type} 匯出成功 (共 ${data.length} 筆)`, 'success');
+                } catch (e) {
+                    showMsg('匯出失敗: ' + e.message, 'error');
+                } finally {
+                    setLoading(false);
+                }
             };
 
             const showMsg = (text, type) => { setMsg({ text, type }); setTimeout(() => setMsg({ text: '', type: '' }), 3000); };
