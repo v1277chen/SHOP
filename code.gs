@@ -157,9 +157,12 @@ function readSheet(ss, sheetName, page, pageSize, searchParams) {
         
         // 用 TextFinder 搜尋該欄位 (只搜資料區，不含標題列)
         const searchRange = sheet.getRange(2, colIndex + 1, lastRow - 1, 1);
+        
+        // CID1 欄位使用精確匹配，其他欄位使用模糊搜尋
+        const useExactMatch = (key === 'CID1');
         const finder = searchRange.createTextFinder(searchVal)
-          .matchCase(false)           // 不區分大小寫
-          .matchEntireCell(false);    // 模糊搜尋 (部分匹配)
+          .matchCase(false)                   // 不區分大小寫
+          .matchEntireCell(useExactMatch);    // CID1 精確匹配，其他模糊搜尋
         
         const matches = finder.findAll();
         const rowSet = new Set(matches.map(cell => cell.getRow()));
