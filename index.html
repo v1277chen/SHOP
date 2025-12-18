@@ -319,6 +319,7 @@
             // 清除快取
             clear: async () => {
                 try {
+                    cacheService._memoryCache = null; // 清除記憶體快取
                     const db = await cacheService.init();
                     return new Promise((resolve, reject) => {
                         const tx = db.transaction([cacheService.STORE_NAME, cacheService.META_STORE], 'readwrite');
@@ -332,9 +333,25 @@
                 }
             },
 
-            // 本地搜尋 (模糊匹配)
-            searchLocal: async (searchParams) => {
-                const all = await cacheService.getCustomers();
+            // [NEW] 記憶體快取
+            _memoryCache: null,
+
+            // [NEW] 載入資料到記憶體（用於加速搜尋）
+            loadToMemory: async () => {
+                if (cacheService._memoryCache) return cacheService._memoryCache;
+                const data = await cacheService.getCustomers();
+                cacheService._memoryCache = data;
+                return data;
+            },
+
+            // [NEW] 設定記憶體快取（建立快取時直接設定，避免再次讀取）
+            setMemoryCache: (data) => {
+                cacheService._memoryCache = data;
+            },
+
+            // 本地搜尋 (使用記憶體快取，真正即時)
+            searchLocal: (searchParams) => {
+                const all = cacheService._memoryCache || [];
                 if (!searchParams || Object.keys(searchParams).length === 0 || Object.values(searchParams).every(v => !v)) {
                     return all;
                 }
@@ -350,6 +367,11 @@
                         return itemVal.includes(queryVal);
                     });
                 });
+            },
+
+            // [NEW] 檢查是否有記憶體快取
+            hasMemoryCache: () => {
+                return cacheService._memoryCache && cacheService._memoryCache.length > 0;
             }
         };
 
@@ -804,6 +826,10 @@
             const loadCacheInfo = async () => {
                 const info = await cacheService.getCacheInfo();
                 setCacheInfo(info);
+                // 如果有快取資訊，載入到記憶體
+                if (info) {
+                    await cacheService.loadToMemory();
+                }
             };
 
             // [NEW] 建立本地快取
@@ -826,7 +852,10 @@
                     // 3. 儲存到 IndexedDB
                     const savedCount = await cacheService.saveCustomers(allCustomers);
 
-                    // 4. 更新快取資訊
+                    // 4. 同時設定記憶體快取（關鍵！這樣搜尋才會即時）
+                    cacheService.setMemoryCache(allCustomers);
+
+                    // 5. 更新快取資訊
                     await loadCacheInfo();
 
                     showMsg(`快取建立完成！共 ${savedCount} 筆客戶資料`, 'success');
@@ -838,43 +867,32 @@
                 }
             };
 
-            // [MODIFIED] 搜尋 - 優先使用本地快取
-            const handleSearch = async () => {
+            // [MODIFIED] 搜尋 - 優先使用記憶體快取（真正即時）
+            const handleSearch = () => {
                 setCurrentPage(1);
                 setHasSearched(true);
-                setLoading(true);
 
-                try {
-                    // 檢查是否有本地快取
-                    const cachedCustomers = await cacheService.getCustomers();
+                // 檢查是否有記憶體快取（同步檢查，無延遲）
+                if (cacheService.hasMemoryCache()) {
+                    // 使用記憶體快取搜尋（同步，毫秒級）
+                    setUsingCache(true);
+                    const results = cacheService.searchLocal(searchCriteria);
 
-                    if (cachedCustomers.length > 0) {
-                        // 使用本地快取搜尋（超快）
-                        setUsingCache(true);
-                        const results = await cacheService.searchLocal(searchCriteria);
+                    // 本地分頁
+                    const pageSize = DEFAULT_PAGE_SIZE;
+                    const total = results.length;
+                    const pages = Math.ceil(total / pageSize) || 1;
+                    const pagedResults = results.slice(0, pageSize);
 
-                        // 本地分頁
-                        const pageSize = DEFAULT_PAGE_SIZE;
-                        const total = results.length;
-                        const pages = Math.ceil(total / pageSize) || 1;
-                        const pagedResults = results.slice(0, pageSize);
-
-                        setCustomers(pagedResults);
-                        setTotalCount(total);
-                        setTotalPages(pages);
-                        setFilteredCustomers(results); // 保存完整結果供分頁使用
-                    } else {
-                        // 無快取，走 API
-                        setUsingCache(false);
-                        await fetchData(1);
-                    }
-                } catch (e) {
-                    console.error('handleSearch error:', e);
-                    // 回退到 API 搜尋
+                    setCustomers(pagedResults);
+                    setTotalCount(total);
+                    setTotalPages(pages);
+                    setFilteredCustomers(results); // 保存完整結果供分頁使用
+                } else {
+                    // 無快取，走 API
                     setUsingCache(false);
-                    await fetchData(1);
-                } finally {
-                    setLoading(false);
+                    setLoading(true);
+                    fetchData(1).finally(() => setLoading(false));
                 }
             };
 
