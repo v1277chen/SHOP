@@ -214,6 +214,142 @@
                     console.error('readCustomerPrx error:', e);
                     return [];
                 }
+            },
+            // [NEW] 批次更新所有客戶的 prxCount
+            updateAllPrxCount: async () => {
+                try {
+                    const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'updateAllPrxCount' }) });
+                    return await res.json();
+                } catch (e) {
+                    console.error('updateAllPrxCount error:', e);
+                    return { status: 'error', message: e.toString() };
+                }
+            }
+        };
+
+        /* ==========================================================================
+           MODULE: CacheService (本地快取服務)
+           用途：使用 IndexedDB 快取客戶資料，加速搜尋
+           ========================================================================== */
+        const cacheService = {
+            DB_NAME: 'ShopCacheDB',
+            DB_VERSION: 1,
+            STORE_NAME: 'customers',
+            META_STORE: 'meta',
+
+            // 初始化 IndexedDB
+            init: () => {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(cacheService.DB_NAME, cacheService.DB_VERSION);
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        // 建立客戶資料表
+                        if (!db.objectStoreNames.contains(cacheService.STORE_NAME)) {
+                            const store = db.createObjectStore(cacheService.STORE_NAME, { keyPath: 'id' });
+                            store.createIndex('CID1', 'CID1', { unique: false });
+                            store.createIndex('NAME', 'NAME', { unique: false });
+                        }
+                        // 建立快取 metadata 表
+                        if (!db.objectStoreNames.contains(cacheService.META_STORE)) {
+                            db.createObjectStore(cacheService.META_STORE, { keyPath: 'key' });
+                        }
+                    };
+                });
+            },
+
+            // 儲存客戶資料到快取
+            saveCustomers: async (customers) => {
+                const db = await cacheService.init();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction([cacheService.STORE_NAME, cacheService.META_STORE], 'readwrite');
+                    const store = tx.objectStore(cacheService.STORE_NAME);
+                    const metaStore = tx.objectStore(cacheService.META_STORE);
+
+                    // 清空舊資料
+                    store.clear();
+
+                    // 寫入新資料
+                    customers.forEach(c => {
+                        if (c.id) store.put(c);
+                    });
+
+                    // 更新 metadata
+                    metaStore.put({ key: 'lastUpdate', value: new Date().toISOString(), count: customers.length });
+
+                    tx.oncomplete = () => { db.close(); resolve(customers.length); };
+                    tx.onerror = () => { db.close(); reject(tx.error); };
+                });
+            },
+
+            // 從快取讀取客戶資料
+            getCustomers: async () => {
+                try {
+                    const db = await cacheService.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction(cacheService.STORE_NAME, 'readonly');
+                        const store = tx.objectStore(cacheService.STORE_NAME);
+                        const request = store.getAll();
+                        request.onsuccess = () => { db.close(); resolve(request.result || []); };
+                        request.onerror = () => { db.close(); reject(request.error); };
+                    });
+                } catch (e) {
+                    console.error('getCustomers from cache error:', e);
+                    return [];
+                }
+            },
+
+            // 取得快取資訊
+            getCacheInfo: async () => {
+                try {
+                    const db = await cacheService.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction(cacheService.META_STORE, 'readonly');
+                        const store = tx.objectStore(cacheService.META_STORE);
+                        const request = store.get('lastUpdate');
+                        request.onsuccess = () => { db.close(); resolve(request.result || null); };
+                        request.onerror = () => { db.close(); reject(request.error); };
+                    });
+                } catch (e) {
+                    return null;
+                }
+            },
+
+            // 清除快取
+            clear: async () => {
+                try {
+                    const db = await cacheService.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction([cacheService.STORE_NAME, cacheService.META_STORE], 'readwrite');
+                        tx.objectStore(cacheService.STORE_NAME).clear();
+                        tx.objectStore(cacheService.META_STORE).clear();
+                        tx.oncomplete = () => { db.close(); resolve(true); };
+                        tx.onerror = () => { db.close(); reject(tx.error); };
+                    });
+                } catch (e) {
+                    return false;
+                }
+            },
+
+            // 本地搜尋 (模糊匹配)
+            searchLocal: async (searchParams) => {
+                const all = await cacheService.getCustomers();
+                if (!searchParams || Object.keys(searchParams).length === 0 || Object.values(searchParams).every(v => !v)) {
+                    return all;
+                }
+                return all.filter(item => {
+                    return Object.keys(searchParams).every(key => {
+                        const queryVal = String(searchParams[key] || '').toLowerCase().trim();
+                        if (!queryVal) return true;
+                        const itemVal = String(item[key] || '').toLowerCase();
+                        // CID1 使用精確匹配，其他使用模糊匹配
+                        if (key === 'CID1') {
+                            return itemVal === queryVal;
+                        }
+                        return itemVal.includes(queryVal);
+                    });
+                });
             }
         };
 
@@ -268,6 +404,7 @@
          * 搜尋與列表視圖元件
          * 包含搜尋條件輸入框、搜尋按鈕、以及資料列表呈現
          * [NEW] 新增分頁控制面板
+         * [NEW] 新增加速快取功能
          */
         const SearchView = ({
             searchCriteria,      // 搜尋條件狀態
@@ -283,10 +420,46 @@
             currentPage,         // [NEW] 目前頁碼
             totalPages,          // [NEW] 總頁數
             totalCount,          // [NEW] 總筆數
-            setPage              // [NEW] 設定頁碼函式
+            setPage,             // [NEW] 設定頁碼函式
+            cacheInfo,           // [NEW] 快取資訊
+            isBuilding,          // [NEW] 是否正在建立快取
+            buildCache,          // [NEW] 建立快取函式
+            usingCache           // [NEW] 是否使用快取搜尋
         }) => {
             return (
                 <div className="space-y-6">
+                    {/* 快取狀態區塊 */}
+                    <div className="bg-gradient-to-r from-purple-50 to-blue-50 p-4 rounded shadow border border-purple-100">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center">
+                                <Database className="w-5 h-5 mr-2 text-purple-600" />
+                                <span className="font-semibold text-purple-800">快取加速</span>
+                                {cacheInfo && (
+                                    <span className="ml-3 text-sm text-gray-600">
+                                        最後更新: {new Date(cacheInfo.value).toLocaleString()} | 共 {cacheInfo.count} 筆
+                                    </span>
+                                )}
+                                {!cacheInfo && <span className="ml-3 text-sm text-gray-500">尚未建立快取</span>}
+                            </div>
+                            <button
+                                onClick={buildCache}
+                                disabled={isBuilding}
+                                className={`px-4 py-2 rounded flex items-center font-bold ${isBuilding ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-purple-600 text-white hover:bg-purple-700 shadow'}`}
+                            >
+                                {isBuilding ? (
+                                    <><span className="animate-spin mr-2">⏳</span> 建立中...</>
+                                ) : (
+                                    <><Database className="w-4 h-4 mr-1" /> 建立快取</>
+                                )}
+                            </button>
+                        </div>
+                        {usingCache && hasSearched && (
+                            <div className="mt-2 text-sm text-green-700 flex items-center">
+                                <span className="mr-1">✅</span> 使用本地快取搜尋 (速度極快)
+                            </div>
+                        )}
+                    </div>
+
                     {/* 搜尋條件區塊 */}
                     <div className="bg-white p-4 rounded shadow">
                         <div className="flex items-center justify-between mb-4">
@@ -494,6 +667,11 @@
             const [msg, setMsg] = useState({ text: '', type: '' });
             const [authError, setAuthError] = useState(null);
 
+            // [NEW] 快取相關狀態
+            const [cacheInfo, setCacheInfo] = useState(null);
+            const [isBuilding, setIsBuilding] = useState(false);
+            const [usingCache, setUsingCache] = useState(false);
+
             // Init
             useEffect(() => {
                 const check = setInterval(() => {
@@ -622,11 +800,104 @@
                 setCustomers([]); setAllPrescriptions([]); setSelectedCustomer(null); setFilteredCustomers([]); setHasSearched(false);
             };
 
-            const handleSearch = () => {
-                setCurrentPage(1);
-                fetchData(1);
-                setHasSearched(true);
+            // [NEW] 載入快取資訊
+            const loadCacheInfo = async () => {
+                const info = await cacheService.getCacheInfo();
+                setCacheInfo(info);
             };
+
+            // [NEW] 建立本地快取
+            const buildCache = async () => {
+                setIsBuilding(true);
+                showMsg('正在更新驗光紀錄統計...', 'info');
+
+                try {
+                    // 1. 更新所有客戶的 prxCount
+                    const updateRes = await apiService.updateAllPrxCount();
+                    if (updateRes.status !== 'success') {
+                        throw new Error(updateRes.message || '更新 prxCount 失敗');
+                    }
+                    showMsg(`已更新 ${updateRes.updated} 筆客戶的驗光統計，正在載入資料...`, 'info');
+
+                    // 2. 讀取全部 CMF 資料（不分頁）
+                    const allDataRes = await apiService.read('CMF', 1, 0, {}); // pageSize=0 代表全部
+                    const allCustomers = allDataRes.data || [];
+
+                    // 3. 儲存到 IndexedDB
+                    const savedCount = await cacheService.saveCustomers(allCustomers);
+
+                    // 4. 更新快取資訊
+                    await loadCacheInfo();
+
+                    showMsg(`快取建立完成！共 ${savedCount} 筆客戶資料`, 'success');
+                } catch (e) {
+                    console.error('buildCache error:', e);
+                    showMsg('快取建立失敗: ' + e.message, 'error');
+                } finally {
+                    setIsBuilding(false);
+                }
+            };
+
+            // [MODIFIED] 搜尋 - 優先使用本地快取
+            const handleSearch = async () => {
+                setCurrentPage(1);
+                setHasSearched(true);
+                setLoading(true);
+
+                try {
+                    // 檢查是否有本地快取
+                    const cachedCustomers = await cacheService.getCustomers();
+
+                    if (cachedCustomers.length > 0) {
+                        // 使用本地快取搜尋（超快）
+                        setUsingCache(true);
+                        const results = await cacheService.searchLocal(searchCriteria);
+
+                        // 本地分頁
+                        const pageSize = DEFAULT_PAGE_SIZE;
+                        const total = results.length;
+                        const pages = Math.ceil(total / pageSize) || 1;
+                        const pagedResults = results.slice(0, pageSize);
+
+                        setCustomers(pagedResults);
+                        setTotalCount(total);
+                        setTotalPages(pages);
+                        setFilteredCustomers(results); // 保存完整結果供分頁使用
+                    } else {
+                        // 無快取，走 API
+                        setUsingCache(false);
+                        await fetchData(1);
+                    }
+                } catch (e) {
+                    console.error('handleSearch error:', e);
+                    // 回退到 API 搜尋
+                    setUsingCache(false);
+                    await fetchData(1);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            // [NEW] 分頁切換 - 支援快取模式
+            const handlePageChange = async (newPage) => {
+                setCurrentPage(newPage);
+
+                if (usingCache && filteredCustomers.length > 0) {
+                    // 快取模式：本地分頁
+                    const pageSize = DEFAULT_PAGE_SIZE;
+                    const startIndex = (newPage - 1) * pageSize;
+                    const pagedResults = filteredCustomers.slice(startIndex, startIndex + pageSize);
+                    setCustomers(pagedResults);
+                } else {
+                    // API 模式：呼叫 fetchData
+                    await fetchData(newPage);
+                }
+            };
+
+            // [NEW] 初始化時載入快取資訊
+            useEffect(() => {
+                loadCacheInfo();
+            }, []);
 
             // CRUD & Modals
             const openCustomerModal = (c) => {
@@ -808,7 +1079,7 @@
 
             const renderContent = () => {
                 if (userRole === 'pending') return <div className="flex flex-col items-center justify-center h-full text-gray-500"><Lock className="w-16 h-16 mb-4" /><h2 className="text-2xl font-bold">帳號審核中</h2><p>請聯繫管理員開通權限。</p></div>;
-                if (activeTab === 'search' && !selectedCustomer) return <SearchView searchCriteria={searchCriteria} setSearchCriteria={setSearchCriteria} handleSearch={handleSearch} hasSearched={hasSearched} customers={customers} isAdmin={isAdmin} openCustomerModal={openCustomerModal} setSelectedCustomer={setSelectedCustomer} deleteCustomer={deleteCustomer} prxCounts={prxCounts} currentPage={currentPage} totalPages={totalPages} totalCount={totalCount} setPage={setCurrentPage} />;
+                if (activeTab === 'search' && !selectedCustomer) return <SearchView searchCriteria={searchCriteria} setSearchCriteria={setSearchCriteria} handleSearch={handleSearch} hasSearched={hasSearched} customers={customers} isAdmin={isAdmin} openCustomerModal={openCustomerModal} setSelectedCustomer={setSelectedCustomer} deleteCustomer={deleteCustomer} prxCounts={prxCounts} currentPage={currentPage} totalPages={totalPages} totalCount={totalCount} setPage={handlePageChange} cacheInfo={cacheInfo} isBuilding={isBuilding} buildCache={buildCache} usingCache={usingCache} />;
                 if (selectedCustomer) return <CustomerDetailView selectedCustomer={selectedCustomer} isAdmin={isAdmin} openCustomerModal={openCustomerModal} openPrxModal={openPrxModal} deletePrx={deletePrx} customerPrescriptions={customerPrescriptions} />;
                 if (activeTab === 'admin' && isAdmin) return <AdminPanelView exportCSV={exportCSV} systemUsers={systemUsers} addUser={addUser} updateUserRole={updateUserRole} removeUser={removeUser} />;
                 return null;
