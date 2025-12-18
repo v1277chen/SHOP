@@ -519,8 +519,11 @@
                     customers.forEach(c => {
                         if (c && c.CID1) {
                             const id = String(c.CID1).trim();
-                            // 使用 CMF 表中的 prxCount 欄位
-                            if (id) counts[id] = parseInt(c.prxCount) || 0;
+                            // 使用 CMF 表中的 prxCount 欄位，空白時保持 undefined
+                            const rawCount = c.prxCount;
+                            if (id && rawCount !== '' && rawCount !== undefined && rawCount !== null) {
+                                counts[id] = parseInt(rawCount);
+                            }
                         }
                     });
                 }
