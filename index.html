@@ -1050,6 +1050,7 @@
                         sheet: 'CMF',
                         searchCriteria: JSON.stringify(searchCriteria),
                         resultCount: total,
+                        source: 'cache',  // 使用快取搜尋
                         duration: Date.now() - startTime
                     });
                 } else {
@@ -1255,7 +1256,7 @@
                         exportHeaders = ['timestamp', 'email', 'action', 'sheet', 'targetId', 'status', 'message', 'duration_ms'];
                     } else if (type === 'search') {
                         sorted = [...data].sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
-                        exportHeaders = ['timestamp', 'email', 'sheet', 'searchCriteria', 'resultCount', 'duration_ms'];
+                        exportHeaders = ['timestamp', 'email', 'sheet', 'searchCriteria', 'resultCount', 'source', 'duration_ms'];
                     } else {
                         // 其他類型：使用資料的所有鍵作為欄位
                         sorted = data;

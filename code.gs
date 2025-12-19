@@ -129,8 +129,8 @@ function logSearch(ss, logData) {
     // 若 search 頁籤不存在則建立
     if (!searchSheet) {
       searchSheet = ss.insertSheet('search');
-      // 設定標題列
-      searchSheet.appendRow(['timestamp', 'email', 'sheet', 'searchCriteria', 'resultCount', 'duration_ms']);
+      // 設定標題列（新增 source 欄位）
+      searchSheet.appendRow(['timestamp', 'email', 'sheet', 'searchCriteria', 'resultCount', 'source', 'duration_ms']);
       // 凍結標題列
       searchSheet.setFrozenRows(1);
     }
@@ -142,6 +142,7 @@ function logSearch(ss, logData) {
       logData.sheet || '',
       logData.searchCriteria || '',
       logData.resultCount || 0,
+      logData.source || 'api',  // 搜尋來源：cache 或 api
       logData.duration || ''
     ]);
     
@@ -267,6 +268,7 @@ function handleRequest(e) {
         sheet: reqSheet,
         searchCriteria: JSON.stringify(searchParams),
         resultCount: result.total || 0,
+        source: 'api',  // 後端 API 搜尋
         duration: Date.now() - startTime
       });
     }
@@ -286,6 +288,7 @@ function handleRequest(e) {
           sheet: logData.sheet || 'CMF',
           searchCriteria: logData.searchCriteria || '',
           resultCount: logData.resultCount || 0,
+          source: logData.source || 'cache',  // 前端快取搜尋
           duration: logData.duration || 0
         });
         result = { status: 'success', message: 'Search logged' };
