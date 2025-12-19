@@ -276,6 +276,23 @@ function handleRequest(e) {
     else if (reqAction === 'delete') result = deleteRow(ss, reqSheet, reqId);
     else if (reqAction === 'getPrxCount') result = getPrxCount(ss, reqId); // reqId = CID1
     else if (reqAction === 'updateAllPrxCount') result = updateAllPrxCount(ss); // 批次更新所有 prxCount
+    else if (reqAction === 'logSearch') {
+      // 前端快取搜尋時呼叫此 action 記錄日誌
+      const logData = postData ? postData.logData : null;
+      if (logData) {
+        logSearch(ss, {
+          timestamp: new Date().toISOString(),
+          email: authResult.email,
+          sheet: logData.sheet || 'CMF',
+          searchCriteria: logData.searchCriteria || '',
+          resultCount: logData.resultCount || 0,
+          duration: logData.duration || 0
+        });
+        result = { status: 'success', message: 'Search logged' };
+      } else {
+        result = { status: 'error', message: 'Missing logData' };
+      }
+    }
     else result = { status: 'error', message: 'Unknown action: ' + reqAction };
 
     // 只記錄寫入操作「失敗」的日誌 (成功不記錄)

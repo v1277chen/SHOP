@@ -244,17 +244,29 @@
                     console.error('updateAllPrxCount error:', e);
                     return { status: 'error', message: e.toString() };
                 }
+            },
+            // [NEW] 記錄搜尋日誌 (用於快取搜尋)
+            logSearch: async (logData) => {
+                try {
+                    const idToken = await apiService.getIdToken();
+                    const res = await fetch(GAS_API_URL, { method: 'POST', body: JSON.stringify({ action: 'logSearch', logData, idToken }) });
+                    return await res.json();
+                } catch (e) {
+                    console.error('logSearch error:', e);
+                    return { status: 'error', message: e.toString() };
+                }
             }
         };
 
         /* ==========================================================================
            MODULE: CacheService (本地快取服務)
-           用途：使用 IndexedDB 快取客戶資料，加速搜尋
+           用途：使用 IndexedDB 快取客戶資料及驗光資料，加速搜尋
            ========================================================================== */
         const cacheService = {
             DB_NAME: 'ShopCacheDB',
-            DB_VERSION: 1,
+            DB_VERSION: 2, // 升級版本以新增 prescriptions store
             STORE_NAME: 'customers',
+            PRX_STORE: 'prescriptions', // [NEW] 驗光資料 store
             META_STORE: 'meta',
 
             // 初始化 IndexedDB
@@ -270,6 +282,11 @@
                             const store = db.createObjectStore(cacheService.STORE_NAME, { keyPath: 'id' });
                             store.createIndex('CID1', 'CID1', { unique: false });
                             store.createIndex('NAME', 'NAME', { unique: false });
+                        }
+                        // [NEW] 建立驗光資料表
+                        if (!db.objectStoreNames.contains(cacheService.PRX_STORE)) {
+                            const prxStore = db.createObjectStore(cacheService.PRX_STORE, { keyPath: 'id' });
+                            prxStore.createIndex('CID1', 'CID1', { unique: false }); // 用 CID1 索引以快速查詢
                         }
                         // 建立快取 metadata 表
                         if (!db.objectStoreNames.contains(cacheService.META_STORE)) {
@@ -303,6 +320,30 @@
                 });
             },
 
+            // [NEW] 儲存驗光資料到快取
+            savePrescriptions: async (prescriptions) => {
+                const db = await cacheService.init();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction([cacheService.PRX_STORE, cacheService.META_STORE], 'readwrite');
+                    const store = tx.objectStore(cacheService.PRX_STORE);
+                    const metaStore = tx.objectStore(cacheService.META_STORE);
+
+                    // 清空舊資料
+                    store.clear();
+
+                    // 寫入新資料
+                    prescriptions.forEach(p => {
+                        if (p.id) store.put(p);
+                    });
+
+                    // 更新 metadata
+                    metaStore.put({ key: 'prxLastUpdate', value: new Date().toISOString(), count: prescriptions.length });
+
+                    tx.oncomplete = () => { db.close(); resolve(prescriptions.length); };
+                    tx.onerror = () => { db.close(); reject(tx.error); };
+                });
+            },
+
             // 從快取讀取客戶資料
             getCustomers: async () => {
                 try {
@@ -316,6 +357,24 @@
                     });
                 } catch (e) {
                     console.error('getCustomers from cache error:', e);
+                    return [];
+                }
+            },
+
+            // [NEW] 從快取讀取指定客戶的驗光資料
+            getPrescriptionsByCID1: async (cid1) => {
+                try {
+                    const db = await cacheService.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction(cacheService.PRX_STORE, 'readonly');
+                        const store = tx.objectStore(cacheService.PRX_STORE);
+                        const index = store.index('CID1');
+                        const request = index.getAll(String(cid1).trim());
+                        request.onsuccess = () => { db.close(); resolve(request.result || []); };
+                        request.onerror = () => { db.close(); reject(request.error); };
+                    });
+                } catch (e) {
+                    console.error('getPrescriptionsByCID1 error:', e);
                     return [];
                 }
             },
@@ -336,14 +395,32 @@
                 }
             },
 
+            // [NEW] 取得 PRXMF 快取資訊
+            getPrxCacheInfo: async () => {
+                try {
+                    const db = await cacheService.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = db.transaction(cacheService.META_STORE, 'readonly');
+                        const store = tx.objectStore(cacheService.META_STORE);
+                        const request = store.get('prxLastUpdate');
+                        request.onsuccess = () => { db.close(); resolve(request.result || null); };
+                        request.onerror = () => { db.close(); reject(request.error); };
+                    });
+                } catch (e) {
+                    return null;
+                }
+            },
+
             // 清除快取
             clear: async () => {
                 try {
                     cacheService._memoryCache = null; // 清除記憶體快取
+                    cacheService._prxMemoryCache = null; // [NEW] 清除驗光記憶體快取
                     const db = await cacheService.init();
                     return new Promise((resolve, reject) => {
-                        const tx = db.transaction([cacheService.STORE_NAME, cacheService.META_STORE], 'readwrite');
+                        const tx = db.transaction([cacheService.STORE_NAME, cacheService.PRX_STORE, cacheService.META_STORE], 'readwrite');
                         tx.objectStore(cacheService.STORE_NAME).clear();
+                        tx.objectStore(cacheService.PRX_STORE).clear();
                         tx.objectStore(cacheService.META_STORE).clear();
                         tx.oncomplete = () => { db.close(); resolve(true); };
                         tx.onerror = () => { db.close(); reject(tx.error); };
@@ -355,6 +432,7 @@
 
             // [NEW] 記憶體快取
             _memoryCache: null,
+            _prxMemoryCache: null, // [NEW] 驗光資料記憶體快取
 
             // [NEW] 載入資料到記憶體（用於加速搜尋）
             loadToMemory: async () => {
@@ -367,6 +445,23 @@
             // [NEW] 設定記憶體快取（建立快取時直接設定，避免再次讀取）
             setMemoryCache: (data) => {
                 cacheService._memoryCache = data;
+            },
+
+            // [NEW] 設定驗光資料記憶體快取
+            setPrxMemoryCache: (data) => {
+                cacheService._prxMemoryCache = data;
+            },
+
+            // [NEW] 從記憶體快取中搜尋驗光資料
+            searchPrxLocal: (cid1) => {
+                if (!cacheService._prxMemoryCache) return null;
+                const targetCid = String(cid1).trim();
+                return cacheService._prxMemoryCache.filter(p => String(p.CID1).trim() === targetCid);
+            },
+
+            // [NEW] 檢查是否有驗光記憶體快取
+            hasPrxMemoryCache: () => {
+                return cacheService._prxMemoryCache && cacheService._prxMemoryCache.length > 0;
             },
 
             // 本地搜尋 (使用記憶體快取，真正即時)
@@ -808,19 +903,28 @@
                 }
             }, [user, userRole, currentPage]);
 
-            // [MODIFIED] 進入客戶詳細頁時，讀取該客戶的驗光資料並更新 prxCount
+            // [MODIFIED] 進入客戶詳細頁時，優先從快取讀取該客戶的驗光資料
             useEffect(() => {
                 const loadCustomerPrx = async () => {
                     if (selectedCustomer) {
                         setLoading(true);
                         try {
-                            // 1. 讀取該客戶的驗光資料
-                            const prxData = await apiService.readCustomerPrx(selectedCustomer.CID1);
+                            let prxData;
+
+                            // 優先使用記憶體快取（毫秒級回應）
+                            if (cacheService.hasPrxMemoryCache()) {
+                                prxData = cacheService.searchPrxLocal(selectedCustomer.CID1);
+                                console.log('使用快取讀取驗光資料:', prxData.length, '筆');
+                            } else {
+                                // 無快取時呼叫 API
+                                prxData = await apiService.readCustomerPrx(selectedCustomer.CID1);
+                            }
+
+                            // 依日期排序（新到舊）
                             prxData.sort((a, b) => new Date(b.DATE) - new Date(a.DATE));
                             setCustomerPrescriptions(prxData);
                             setAllPrescriptions(prxData); // 暫存到 allPrescriptions 供新增/編輯使用
 
-                            // prxCount 改為本地計算，不再等待 API 回應
                             // 背景更新 CMF 的 prxCount 欄位（不 await，不阻塞畫面）
                             apiService.getPrxCount(selectedCustomer.CID1);
                         } catch (e) {
@@ -850,13 +954,30 @@
                 setCustomers([]); setAllPrescriptions([]); setSelectedCustomer(null); setFilteredCustomers([]); setHasSearched(false);
             };
 
-            // [NEW] 載入快取資訊
+            // [NEW] 載入快取資訊（包含 CMF 和 PRXMF）
             const loadCacheInfo = async () => {
                 const info = await cacheService.getCacheInfo();
                 setCacheInfo(info);
                 // 如果有快取資訊，載入到記憶體
                 if (info) {
                     await cacheService.loadToMemory();
+                    // 同時載入 PRXMF 快取到記憶體
+                    const prxInfo = await cacheService.getPrxCacheInfo();
+                    if (prxInfo) {
+                        try {
+                            const db = await cacheService.init();
+                            const tx = db.transaction(cacheService.PRX_STORE, 'readonly');
+                            const store = tx.objectStore(cacheService.PRX_STORE);
+                            const request = store.getAll();
+                            request.onsuccess = () => {
+                                cacheService.setPrxMemoryCache(request.result || []);
+                                db.close();
+                                console.log('PRXMF 快取已載入記憶體:', (request.result || []).length, '筆');
+                            };
+                        } catch (e) {
+                            console.error('載入 PRXMF 快取失敗:', e);
+                        }
+                    }
                 }
             };
 
@@ -873,20 +994,26 @@
                     }
                     showMsg(`已更新 ${updateRes.updated} 筆客戶的驗光統計，正在載入資料...`, 'info');
 
-                    // 2. 讀取全部 CMF 資料（不分頁）
-                    const allDataRes = await apiService.read('CMF', 1, 0, {}); // pageSize=0 代表全部
-                    const allCustomers = allDataRes.data || [];
+                    // 2. 同時讀取 CMF 和 PRXMF 資料
+                    const [cmfRes, prxRes] = await Promise.all([
+                        apiService.read('CMF', 1, 0, {}),   // pageSize=0 代表全部
+                        apiService.read('PRXMF', 1, 0, {})  // 讀取全部驗光資料
+                    ]);
+                    const allCustomers = cmfRes.data || [];
+                    const allPrescriptions = prxRes.data || [];
 
                     // 3. 儲存到 IndexedDB
-                    const savedCount = await cacheService.saveCustomers(allCustomers);
+                    const savedCmfCount = await cacheService.saveCustomers(allCustomers);
+                    const savedPrxCount = await cacheService.savePrescriptions(allPrescriptions);
 
                     // 4. 同時設定記憶體快取（關鍵！這樣搜尋才會即時）
                     cacheService.setMemoryCache(allCustomers);
+                    cacheService.setPrxMemoryCache(allPrescriptions);
 
                     // 5. 更新快取資訊
                     await loadCacheInfo();
 
-                    showMsg(`快取建立完成！共 ${savedCount} 筆客戶資料`, 'success');
+                    showMsg(`快取建立完成！CMF: ${savedCmfCount} 筆，PRXMF: ${savedPrxCount} 筆`, 'success');
                 } catch (e) {
                     console.error('buildCache error:', e);
                     showMsg('快取建立失敗: ' + e.message, 'error');
@@ -899,6 +1026,7 @@
             const handleSearch = () => {
                 setCurrentPage(1);
                 setHasSearched(true);
+                const startTime = Date.now();
 
                 // 檢查是否有記憶體快取（同步檢查，無延遲）
                 if (cacheService.hasMemoryCache()) {
@@ -916,8 +1044,16 @@
                     setTotalCount(total);
                     setTotalPages(pages);
                     setFilteredCustomers(results); // 保存完整結果供分頁使用
+
+                    // 記錄搜尋日誌（背景執行，不阻塞 UI）
+                    apiService.logSearch({
+                        sheet: 'CMF',
+                        searchCriteria: JSON.stringify(searchCriteria),
+                        resultCount: total,
+                        duration: Date.now() - startTime
+                    });
                 } else {
-                    // 無快取，走 API
+                    // 無快取，走 API（API 會自動記錄日誌）
                     setUsingCache(false);
                     setLoading(true);
                     fetchData(1).finally(() => setLoading(false));
