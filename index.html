@@ -961,19 +961,23 @@
                 // 如果有快取資訊，載入到記憶體
                 if (info) {
                     await cacheService.loadToMemory();
-                    // 同時載入 PRXMF 快取到記憶體
+                    console.log('CMF 快取已載入記憶體');
+
+                    // 同時載入 PRXMF 快取到記憶體（使用 Promise 確保等待完成）
                     const prxInfo = await cacheService.getPrxCacheInfo();
                     if (prxInfo) {
                         try {
                             const db = await cacheService.init();
-                            const tx = db.transaction(cacheService.PRX_STORE, 'readonly');
-                            const store = tx.objectStore(cacheService.PRX_STORE);
-                            const request = store.getAll();
-                            request.onsuccess = () => {
-                                cacheService.setPrxMemoryCache(request.result || []);
-                                db.close();
-                                console.log('PRXMF 快取已載入記憶體:', (request.result || []).length, '筆');
-                            };
+                            const prxData = await new Promise((resolve, reject) => {
+                                const tx = db.transaction(cacheService.PRX_STORE, 'readonly');
+                                const store = tx.objectStore(cacheService.PRX_STORE);
+                                const request = store.getAll();
+                                request.onsuccess = () => resolve(request.result || []);
+                                request.onerror = () => reject(request.error);
+                            });
+                            cacheService.setPrxMemoryCache(prxData);
+                            db.close();
+                            console.log('PRXMF 快取已載入記憶體:', prxData.length, '筆');
                         } catch (e) {
                             console.error('載入 PRXMF 快取失敗:', e);
                         }
