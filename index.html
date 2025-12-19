@@ -816,6 +816,7 @@
             const [cacheInfo, setCacheInfo] = useState(null);
             const [isBuilding, setIsBuilding] = useState(false);
             const [usingCache, setUsingCache] = useState(false);
+            const [isCacheLoading, setIsCacheLoading] = useState(true); // 快取載入中狀態
 
             // Init
             useEffect(() => {
@@ -956,32 +957,38 @@
 
             // [NEW] 載入快取資訊（包含 CMF 和 PRXMF）
             const loadCacheInfo = async () => {
-                const info = await cacheService.getCacheInfo();
-                setCacheInfo(info);
-                // 如果有快取資訊，載入到記憶體
-                if (info) {
-                    await cacheService.loadToMemory();
-                    console.log('CMF 快取已載入記憶體');
+                setIsCacheLoading(true); // 開始載入
+                try {
+                    const info = await cacheService.getCacheInfo();
+                    setCacheInfo(info);
+                    // 如果有快取資訊，載入到記憶體
+                    if (info) {
+                        await cacheService.loadToMemory();
+                        console.log('CMF 快取已載入記憶體');
 
-                    // 同時載入 PRXMF 快取到記憶體（使用 Promise 確保等待完成）
-                    const prxInfo = await cacheService.getPrxCacheInfo();
-                    if (prxInfo) {
-                        try {
-                            const db = await cacheService.init();
-                            const prxData = await new Promise((resolve, reject) => {
+                        // 同時載入 PRXMF 快取到記憶體（使用 Promise 確保等待完成）
+                        const prxInfo = await cacheService.getPrxCacheInfo();
+                        if (prxInfo) {
+                            try {
+                                const db = await cacheService.init();
                                 const tx = db.transaction(cacheService.PRX_STORE, 'readonly');
                                 const store = tx.objectStore(cacheService.PRX_STORE);
                                 const request = store.getAll();
-                                request.onsuccess = () => resolve(request.result || []);
-                                request.onerror = () => reject(request.error);
-                            });
-                            cacheService.setPrxMemoryCache(prxData);
-                            db.close();
-                            console.log('PRXMF 快取已載入記憶體:', prxData.length, '筆');
-                        } catch (e) {
-                            console.error('載入 PRXMF 快取失敗:', e);
+                                const prxData = await new Promise((resolve, reject) => {
+                                    request.onsuccess = () => resolve(request.result || []);
+                                    request.onerror = () => reject(request.error);
+                                });
+                                cacheService.setPrxMemoryCache(prxData);
+                                db.close();
+                                console.log('PRXMF 快取已載入記憶體:', prxData.length, '筆');
+                            } catch (e) {
+                                console.error('載入 PRXMF 快取失敗:', e);
+                            }
                         }
                     }
+                } finally {
+                    setIsCacheLoading(false); // 載入完成
+                    console.log('快取載入狀態: 完成');
                 }
             };
 
@@ -1027,9 +1034,23 @@
             };
 
             // [MODIFIED] 搜尋 - 優先使用記憶體快取（真正即時）
-            const handleSearch = () => {
+            const handleSearch = async () => {
                 setCurrentPage(1);
                 setHasSearched(true);
+
+                // 如果快取正在載入且還沒有記憶體快取，短暫等待
+                if (isCacheLoading && !cacheService.hasMemoryCache()) {
+                    setLoading(true);
+                    console.log('等待快取載入完成...');
+                    // 等待直到記憶體快取可用，最多 3 秒
+                    const startWait = Date.now();
+                    while (!cacheService.hasMemoryCache() && (Date.now() - startWait) < 3000) {
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    setLoading(false);
+                    console.log('快取等待結束，記憶體快取狀態:', cacheService.hasMemoryCache());
+                }
+
                 const startTime = Date.now();
 
                 // 檢查是否有記憶體快取（同步檢查，無延遲）
