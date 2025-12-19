@@ -13,6 +13,149 @@
 // 定義 Google 試算表的 ID (請確認此 ID 對應到正確的試算表檔案)
 const SPREADSHEET_ID = '1Ev9CL1iuSblh27YaazjoKe2B_O50193Z4-jf25-8a2U';
 
+// Firebase Web API Key (用於驗證 ID Token)
+const FIREBASE_API_KEY = 'AIzaSyDxtxWF-jQMMxvAeMjP5-HJ6y6_QBxLdsY';
+
+// 允許存取的 Email 白名單 (與前端 PREDEFINED 一致)
+const ALLOWED_EMAILS = [
+  'alenchen@stust.edu.tw',
+  'v1277.chen@gmail.com.tw'
+];
+
+/**
+ * 驗證 Firebase ID Token
+ * @param {string} idToken - Firebase ID Token
+ * @return {Object} { valid: boolean, email: string, error?: string }
+ */
+function verifyFirebaseToken(idToken) {
+  if (!idToken) {
+    return { valid: false, error: 'No token provided' };
+  }
+  
+  try {
+    // 使用 Firebase Auth REST API 驗證 Token
+    const url = 'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + FIREBASE_API_KEY;
+    const response = UrlFetchApp.fetch(url, {
+      method: 'POST',
+      contentType: 'application/json',
+      payload: JSON.stringify({ idToken: idToken }),
+      muteHttpExceptions: true
+    });
+    
+    const statusCode = response.getResponseCode();
+    const data = JSON.parse(response.getContentText());
+    
+    if (statusCode === 200 && data.users && data.users.length > 0) {
+      const user = data.users[0];
+      return { 
+        valid: true, 
+        email: user.email,
+        uid: user.localId
+      };
+    } else {
+      return { valid: false, error: data.error ? data.error.message : 'Token validation failed' };
+    }
+  } catch (e) {
+    Logger.log('Token verification error: ' + e);
+    return { valid: false, error: e.toString() };
+  }
+}
+
+/**
+ * 檢查 Email 是否在白名單或已授權使用者名單中
+ * @param {string} email - 使用者 Email
+ * @return {boolean} 是否允許存取
+ */
+function isEmailAllowed(email) {
+  if (!email) return false;
+  // 白名單永遠允許
+  if (ALLOWED_EMAILS.includes(email)) return true;
+  // 其他使用者：你可以加入額外邏輯，例如檢查 Firestore 中的 sys_users
+  // 目前簡化處理：只要 Token 有效且 email 存在就允許
+  return true;
+}
+
+/**
+ * 記錄 API 請求日誌至 log 頁籤
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {Object} logData - 日誌資料
+ */
+function logRequest(ss, logData) {
+  try {
+    let logSheet = ss.getSheetByName('log');
+    
+    // 若 log 頁籤不存在則建立
+    if (!logSheet) {
+      logSheet = ss.insertSheet('log');
+      // 設定標題列
+      logSheet.appendRow(['timestamp', 'email', 'action', 'sheet', 'targetId', 'status', 'message', 'duration_ms']);
+      // 凍結標題列
+      logSheet.setFrozenRows(1);
+    }
+    
+    // 寫入日誌
+    logSheet.appendRow([
+      logData.timestamp || new Date().toISOString(),
+      logData.email || '',
+      logData.action || '',
+      logData.sheet || '',
+      logData.targetId || '',
+      logData.status || '',
+      logData.message || '',
+      logData.duration || ''
+    ]);
+    
+    // 可選：保持日誌在 10000 筆以內，超過則刪除最舊的
+    const maxRows = 10000;
+    const currentRows = logSheet.getLastRow();
+    if (currentRows > maxRows) {
+      logSheet.deleteRows(2, currentRows - maxRows);
+    }
+  } catch (e) {
+    // 日誌寫入失敗不應影響主要功能
+    Logger.log('Log write error: ' + e);
+  }
+}
+
+/**
+ * 記錄搜尋日誌至 search 頁籤
+ * @param {Spreadsheet} ss - 試算表物件
+ * @param {Object} logData - 日誌資料
+ */
+function logSearch(ss, logData) {
+  try {
+    let searchSheet = ss.getSheetByName('search');
+    
+    // 若 search 頁籤不存在則建立
+    if (!searchSheet) {
+      searchSheet = ss.insertSheet('search');
+      // 設定標題列
+      searchSheet.appendRow(['timestamp', 'email', 'sheet', 'searchCriteria', 'resultCount', 'duration_ms']);
+      // 凍結標題列
+      searchSheet.setFrozenRows(1);
+    }
+    
+    // 寫入日誌
+    searchSheet.appendRow([
+      logData.timestamp || new Date().toISOString(),
+      logData.email || '',
+      logData.sheet || '',
+      logData.searchCriteria || '',
+      logData.resultCount || 0,
+      logData.duration || ''
+    ]);
+    
+    // 可選：保持日誌在 10000 筆以內
+    const maxRows = 10000;
+    const currentRows = searchSheet.getLastRow();
+    if (currentRows > maxRows) {
+      searchSheet.deleteRows(2, currentRows - maxRows);
+    }
+  } catch (e) {
+    Logger.log('Search log write error: ' + e);
+  }
+}
+
 /**
  * 處理 HTTP GET 請求的進入點
  * GET 請求通常用於讀取資料 (Read)
@@ -32,6 +175,7 @@ function doPost(e) { return handleRequest(e); }
 /**
  * 核心請求處理函式
  * 負責解析參數、分派動作、並處理併發鎖定 (LockService) 以確保資料一致性
+ * [SECURITY] 新增 Firebase ID Token 驗證
  * @param {Object} e - 事件參數
  */
 function handleRequest(e) {
@@ -41,8 +185,6 @@ function handleRequest(e) {
   lock.tryLock(30000);
 
   try {
-    // 開啟試算表
-    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     const params = e.parameter || {};
     
     // 解析 POST Body (如果是 POST 請求，資料通常在 body 中)
@@ -53,11 +195,60 @@ function handleRequest(e) {
       }
     }
     
-    // 決定操作參數 (優先使用 POST Body 中的參數，若無則使用 URL Query String 參數)
-    const reqAction = postData ? postData.action : params.action; // 動作: read, create, update, delete
-    const reqSheet = postData ? postData.sheet : params.sheet;   // 表格名稱: CMF (客戶), PRXMF (驗光)
-    const reqData = postData ? postData.data : null;             // 資料內容 (物件或陣列)
-    const reqId = postData ? postData.id : params.id;            // 目標資料 ID (用於 update/delete)
+    // === [SECURITY] Firebase ID Token 驗證 ===
+    const idToken = postData ? postData.idToken : params.idToken;
+    const authResult = verifyFirebaseToken(idToken);
+    const startTime = Date.now(); // 記錄開始時間
+    
+    // 預先取得動作參數 (用於日誌記錄)
+    const reqAction = postData ? postData.action : params.action;
+    const reqSheet = postData ? postData.sheet : params.sheet;
+    const reqId = postData ? postData.id : params.id;
+    
+    // 開啟試算表 (提前開啟以便記錄日誌)
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    
+    if (!authResult.valid) {
+      // 記錄驗證失敗日誌
+      logRequest(ss, {
+        timestamp: new Date().toISOString(),
+        email: 'UNKNOWN',
+        action: reqAction,
+        sheet: reqSheet,
+        targetId: reqId,
+        status: 'AUTH_FAILED',
+        message: authResult.error || 'Invalid token',
+        duration: Date.now() - startTime
+      });
+      return ContentService.createTextOutput(JSON.stringify({ 
+        status: 'error', 
+        message: 'Unauthorized: ' + (authResult.error || 'Invalid token'),
+        code: 'AUTH_FAILED'
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    if (!isEmailAllowed(authResult.email)) {
+      // 記錄權限不足日誌
+      logRequest(ss, {
+        timestamp: new Date().toISOString(),
+        email: authResult.email,
+        action: reqAction,
+        sheet: reqSheet,
+        targetId: reqId,
+        status: 'ACCESS_DENIED',
+        message: 'Email not authorized',
+        duration: Date.now() - startTime
+      });
+      return ContentService.createTextOutput(JSON.stringify({ 
+        status: 'error', 
+        message: 'Forbidden: Email not authorized',
+        code: 'ACCESS_DENIED'
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    // === 驗證通過 ===
+    
+    // 資料內容 (物件或陣列)
+    const reqData = postData ? postData.data : null;
 
     // 分頁與搜尋參數 (通常用於 read 動作)
     const page = parseInt(postData ? postData.page : params.page) || 1;           // 頁碼，預設第 1 頁
@@ -67,7 +258,18 @@ function handleRequest(e) {
     let result = {};
 
     // 根據動作分派給對應函式
-    if (reqAction === 'read') result = readSheet(ss, reqSheet, page, pageSize, searchParams);
+    if (reqAction === 'read') {
+      result = readSheet(ss, reqSheet, page, pageSize, searchParams);
+      // 記錄搜尋日誌至 search 頁籤
+      logSearch(ss, {
+        timestamp: new Date().toISOString(),
+        email: authResult.email,
+        sheet: reqSheet,
+        searchCriteria: JSON.stringify(searchParams),
+        resultCount: result.total || 0,
+        duration: Date.now() - startTime
+      });
+    }
     else if (reqAction === 'create') result = createRow(ss, reqSheet, reqData);
     else if (reqAction === 'createBatch') result = createBatch(ss, reqSheet, reqData);
     else if (reqAction === 'update') result = updateRow(ss, reqSheet, reqId, reqData);
@@ -75,6 +277,20 @@ function handleRequest(e) {
     else if (reqAction === 'getPrxCount') result = getPrxCount(ss, reqId); // reqId = CID1
     else if (reqAction === 'updateAllPrxCount') result = updateAllPrxCount(ss); // 批次更新所有 prxCount
     else result = { status: 'error', message: 'Unknown action: ' + reqAction };
+
+    // 只記錄寫入操作「失敗」的日誌 (成功不記錄)
+    if (reqAction !== 'read' && result.status === 'error') {
+      logRequest(ss, {
+        timestamp: new Date().toISOString(),
+        email: authResult.email,
+        action: reqAction,
+        sheet: reqSheet,
+        targetId: reqId,
+        status: 'error',
+        message: result.message || '',
+        duration: Date.now() - startTime
+      });
+    }
 
     // 設定回傳格式為 JSON
     return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
