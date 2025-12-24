@@ -309,7 +309,11 @@
 
                     // 寫入新資料
                     customers.forEach(c => {
-                        if (c.id) store.put(c);
+                        // [MODIFIED] 確保有 id 才能寫入 IndexedDB
+                        const item = { ...c };
+                        if (!item.id && item.CID1) item.id = String(item.CID1);
+                        // 如果還是沒有 id，則略過或產生一個 temp id (這邊假設客戶一定有 CID1)
+                        if (item.id) store.put(item);
                     });
 
                     // 更新 metadata
@@ -332,8 +336,14 @@
                     store.clear();
 
                     // 寫入新資料
-                    prescriptions.forEach(p => {
-                        if (p.id) store.put(p);
+                    prescriptions.forEach((p, idx) => {
+                        // [MODIFIED] 確保有 id 才能寫入 IndexedDB
+                        const item = { ...p };
+                        if (!item.id) {
+                            // 若無 id，組合 CID1 + DATE + index 產生唯一鍵
+                            item.id = `${item.CID1 || 'unknown'}_${item.DATE || 'nodate'}_${idx}`;
+                        }
+                        store.put(item);
                     });
 
                     // 更新 metadata
@@ -957,14 +967,21 @@
 
             // [NEW] 載入快取資訊（包含 CMF 和 PRXMF）
             const loadCacheInfo = async () => {
+                console.log('[Cache] 開始載入快取資訊...');
                 setIsCacheLoading(true); // 開始載入
                 try {
                     const info = await cacheService.getCacheInfo();
+                    console.log('[Cache] 取得 Meta info:', info);
                     setCacheInfo(info);
+
                     // 如果有快取資訊，載入到記憶體
                     if (info) {
-                        await cacheService.loadToMemory();
-                        console.log('CMF 快取已載入記憶體');
+                        try {
+                            const count = await cacheService.loadToMemory();
+                            console.log(`[Cache] CMF 快取已載入記憶體，共 ${count.length} 筆`);
+                        } catch (cmfErr) {
+                            console.error('[Cache] CMF 載入失敗:', cmfErr);
+                        }
 
                         // 同時載入 PRXMF 快取到記憶體（使用 Promise 確保等待完成）
                         const prxInfo = await cacheService.getPrxCacheInfo();
@@ -980,15 +997,21 @@
                                 });
                                 cacheService.setPrxMemoryCache(prxData);
                                 db.close();
-                                console.log('PRXMF 快取已載入記憶體:', prxData.length, '筆');
+                                console.log(`[Cache] PRXMF 快取已載入記憶體，共 ${prxData.length} 筆`);
                             } catch (e) {
-                                console.error('載入 PRXMF 快取失敗:', e);
+                                console.error('[Cache] 載入 PRXMF 快取失敗:', e);
                             }
+                        } else {
+                            console.log('[Cache] 無 PRXMF 快取資訊');
                         }
+                    } else {
+                        console.log('[Cache] 無 CMF 快取資訊 (可能是初次使用或已被清除)');
                     }
+                } catch (err) {
+                    console.error('[Cache] loadCacheInfo 全局錯誤:', err);
                 } finally {
                     setIsCacheLoading(false); // 載入完成
-                    console.log('快取載入狀態: 完成');
+                    console.log('[Cache] 載入流程結束，isCacheLoading = false');
                 }
             };
 
@@ -1041,14 +1064,14 @@
                 // 如果快取正在載入且還沒有記憶體快取，短暫等待
                 if (isCacheLoading && !cacheService.hasMemoryCache()) {
                     setLoading(true);
-                    console.log('等待快取載入完成...');
+                    console.log('[Search] 發現快取正在載入中，開始等待...');
                     // 等待直到記憶體快取可用，最多 3 秒
                     const startWait = Date.now();
-                    while (!cacheService.hasMemoryCache() && (Date.now() - startWait) < 3000) {
+                    while (!cacheService.hasMemoryCache() && isCacheLoading && (Date.now() - startWait) < 3000) {
                         await new Promise(r => setTimeout(r, 100));
                     }
                     setLoading(false);
-                    console.log('快取等待結束，記憶體快取狀態:', cacheService.hasMemoryCache());
+                    console.log(`[Search] 等待結束，耗時 ${Date.now() - startWait}ms，記憶體快取狀態: ${cacheService.hasMemoryCache()}`);
                 }
 
                 const startTime = Date.now();
@@ -1080,6 +1103,9 @@
                     });
                 } else {
                     // 無快取，走 API（API 會自動記錄日誌）
+                    console.log('[Search] 未使用快取，原因:',
+                        !cacheService.hasMemoryCache() ? '無論是 IndexedDB 或 Memory 都無快取資料' : '未知原因'
+                    );
                     setUsingCache(false);
                     setLoading(true);
                     fetchData(1).finally(() => setLoading(false));
